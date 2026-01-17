@@ -4,9 +4,9 @@ TRUE Iterative Sequential Optimization (ISO) for Distillation Columns
 ======================================================================
 
 Implements the professor's requirements:
-1. Optimize variables ONE AT A TIME: P → NT → NF
+1. Optimize variables ONE AT A TIME: P -> NT -> NF
 2. Outer iteration loop with convergence check
-3. Temperature constraint: T_reb ≤ 120°C (polymerization risk)
+3. Temperature constraint: T_reb <= 120C (polymerization risk)
 4. Infeasibility labeling for constrained points
 5. Reflux diagnostic for unconverged cases
 
@@ -14,21 +14,21 @@ METHODOLOGY (Physical Justification):
 ====================================
 
 OUTER LOOP: Design-level iterations until convergence
-    │
+    |
     ├── STEP 1: Optimize PRESSURE (Strategic Decision)
-    │   • Fix NT, NF from previous iteration
-    │   • Sweep P with temperature constraint
-    │   • Find P* that minimizes feasible TAC
-    │
+    |   * Fix NT, NF from previous iteration
+    |   * Sweep P with temperature constraint
+    |   * Find P* that minimizes feasible TAC
+    |
     ├── STEP 2: Optimize NT (Capital vs Energy Trade-off)
-    │   • Fix P = P*, NF from previous iteration
-    │   • Sweep NT to generate U-curve
-    │   • Find NT* at minimum of U-curve
-    │
+    |   * Fix P = P*, NF from previous iteration
+    |   * Sweep NT to generate U-curve
+    |   * Find NT* at minimum of U-curve
+    |
     └── STEP 3: Optimize NF (Feed Location)
-        • Fix P = P*, NT = NT*
-        • Sweep NF to generate U-curve
-        • Find NF* at minimum of U-curve
+        * Fix P = P*, NT = NT*
+        * Sweep NF to generate U-curve
+        * Find NF* at minimum of U-curve
 
 CONVERGENCE: When (P*, NT*, NF*) unchanged between iterations
 
@@ -41,6 +41,7 @@ import time
 import math
 import json
 import os
+import sys
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field, asdict
@@ -50,11 +51,38 @@ logger = logging.getLogger(__name__)
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# PROGRESS LOGGING FOR DASHBOARD
+# ════════════════════════════════════════════════════════════════════════════
+
+def _emit_progress(iteration: int, phase: str, current: int = 0, total: int = 0,
+                   best_tac: float = None, message: str = None, **kwargs):
+    """
+    Emit structured progress JSON for dashboard live tracking.
+
+    Format: [PROGRESS] {"iteration": 1, "phase": "pressure_sweep", ...}
+    """
+    progress = {
+        "iteration": iteration,
+        "phase": phase,
+        "current": current,
+        "total": total,
+        "algorithm": "ISO",
+    }
+    if best_tac is not None and best_tac < 1e10:
+        progress["best_tac"] = round(best_tac, 2)
+    if message:
+        progress["message"] = message
+    progress.update(kwargs)
+
+    print(f"[PROGRESS] {json.dumps(progress)}", flush=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
 # ════════════════════════════════════════════════════════════════════════════
 
 # CRITICAL: Styrene polymerization temperature limit
-T_REBOILER_MAX = 120.0  # °C - Professor's hard constraint
+T_REBOILER_MAX = 120.0  # C - Professor's hard constraint
 
 # Convergence criteria
 TAC_TOLERANCE = 100  # $/year - TAC change threshold
@@ -157,7 +185,7 @@ class ISOOptimizer:
     Implements professor's requirements:
     1. Variables optimized ONE AT A TIME
     2. Outer iteration loop with convergence check
-    3. Temperature constraint: T_reb ≤ 120°C
+    3. Temperature constraint: T_reb <= 120C
     4. Infeasibility labeling
     """
     
@@ -208,7 +236,7 @@ class ISOOptimizer:
         """
         Run TRUE Iterative Sequential Optimization.
         
-        Sequence: P → NT → NF, repeated until convergence.
+        Sequence: P -> NT -> NF, repeated until convergence.
         
         Parameters
         ----------
@@ -255,6 +283,16 @@ class ISOOptimizer:
             logger.info("=" * 70)
             logger.info(f"ISO ITERATION {iteration}")
             logger.info("=" * 70)
+
+            # Emit progress for dashboard
+            _emit_progress(
+                iteration=iteration,
+                phase="iteration_start",
+                current=iteration,
+                total=self.max_iterations,
+                best_tac=current_tac if current_tac < float('inf') else None,
+                message=f"Starting iteration {iteration}"
+            )
             
             prev_nt = current_nt
             prev_feed = current_feed
@@ -269,12 +307,18 @@ class ISOOptimizer:
             logger.info("-" * 50)
             logger.info(f"STEP 1: Optimize PRESSURE (NT={current_nt}, NF={current_feed} fixed)")
             logger.info("-" * 50)
-            
-            pressure_sweep = self._sweep_pressure(current_nt, current_feed)
+
+            _emit_progress(
+                iteration=iteration,
+                phase="pressure_sweep_start",
+                message=f"Sweeping pressure (NT={current_nt}, NF={current_feed} fixed)"
+            )
+
+            pressure_sweep = self._sweep_pressure(current_nt, current_feed, iteration)
             
             if pressure_sweep.optimal_tac < float('inf'):
                 current_pressure = pressure_sweep.optimal_value
-                logger.info(f"  → P* = {current_pressure:.4f} bar")
+                logger.info(f"  -> P* = {current_pressure:.4f} bar")
             else:
                 logger.warning("  No feasible pressure found!")
             
@@ -286,14 +330,20 @@ class ISOOptimizer:
             logger.info("-" * 50)
             logger.info(f"STEP 2: Optimize NT (P={current_pressure:.4f}, NF={current_feed} fixed)")
             logger.info("-" * 50)
-            
-            nt_sweep = self._sweep_nt(current_pressure, current_feed)
+
+            _emit_progress(
+                iteration=iteration,
+                phase="nt_sweep_start",
+                message=f"Sweeping NT (P={current_pressure:.4f}, NF={current_feed} fixed)"
+            )
+
+            nt_sweep = self._sweep_nt(current_pressure, current_feed, iteration)
             
             if nt_sweep.optimal_tac < float('inf'):
                 current_nt = int(nt_sweep.optimal_value)
                 # Update feed if it's now invalid for new NT
                 current_feed = self._adjust_feed_for_nt(current_feed, current_nt)
-                logger.info(f"  → NT* = {current_nt}")
+                logger.info(f"  -> NT* = {current_nt}")
             else:
                 logger.warning("  No feasible NT found!")
             
@@ -305,13 +355,19 @@ class ISOOptimizer:
             logger.info("-" * 50)
             logger.info(f"STEP 3: Optimize NF (P={current_pressure:.4f}, NT={current_nt} fixed)")
             logger.info("-" * 50)
-            
-            feed_sweep = self._sweep_feed(current_pressure, current_nt)
+
+            _emit_progress(
+                iteration=iteration,
+                phase="feed_sweep_start",
+                message=f"Sweeping feed (P={current_pressure:.4f}, NT={current_nt} fixed)"
+            )
+
+            feed_sweep = self._sweep_feed(current_pressure, current_nt, iteration)
             
             if feed_sweep.optimal_tac < float('inf'):
                 current_feed = int(feed_sweep.optimal_value)
                 current_tac = feed_sweep.optimal_tac
-                logger.info(f"  → NF* = {current_feed}")
+                logger.info(f"  -> NF* = {current_feed}")
             else:
                 logger.warning("  No feasible feed found!")
             
@@ -346,9 +402,9 @@ class ISOOptimizer:
             pressure_changed = abs(current_pressure - prev_pressure) > 0.001
             
             logger.info(f"  TAC change: ${tac_change:,.0f} (tolerance: ${self.tac_tolerance:,.0f})")
-            logger.info(f"  NT changed: {nt_changed} ({prev_nt} → {current_nt})")
-            logger.info(f"  NF changed: {feed_changed} ({prev_feed} → {current_feed})")
-            logger.info(f"  P changed: {pressure_changed} ({prev_pressure:.4f} → {current_pressure:.4f})")
+            logger.info(f"  NT changed: {nt_changed} ({prev_nt} -> {current_nt})")
+            logger.info(f"  NF changed: {feed_changed} ({prev_feed} -> {current_feed})")
+            logger.info(f"  P changed: {pressure_changed} ({prev_pressure:.4f} -> {current_pressure:.4f})")
             
             if tac_change < self.tac_tolerance and not nt_changed and not feed_changed:
                 converged = True
@@ -357,7 +413,7 @@ class ISOOptimizer:
                 break
             else:
                 logger.info("")
-                logger.info("→ Not converged, continuing to next iteration...")
+                logger.info("-> Not converged, continuing to next iteration...")
         
         # ════════════════════════════════════════════════════════════════════
         # BUILD FINAL RESULT
@@ -385,40 +441,66 @@ class ISOOptimizer:
         self.result = result
         
         self._print_summary(result)
-        
+
+        # Emit final progress
+        _emit_progress(
+            iteration=len(self.iterations),
+            phase="completed",
+            current=len(self.iterations),
+            total=len(self.iterations),
+            best_tac=result.optimal_tac,
+            message=f"Optimization complete! TAC=${result.optimal_tac:,.0f}/year",
+            converged=result.converged,
+            optimal_nt=result.optimal_nt,
+            optimal_feed=result.optimal_feed,
+            optimal_pressure=round(result.optimal_pressure, 4)
+        )
+
         return result
     
     # ════════════════════════════════════════════════════════════════════════
     # SWEEP METHODS (ONE VARIABLE AT A TIME)
     # ════════════════════════════════════════════════════════════════════════
     
-    def _sweep_pressure(self, fixed_nt: int, fixed_feed: int) -> SweepResult:
+    def _sweep_pressure(self, fixed_nt: int, fixed_feed: int, iteration: int = 1) -> SweepResult:
         """
         Sweep pressure at fixed NT and NF.
-        
-        Includes temperature constraint check: T_reb ≤ 120°C
+
+        Includes temperature constraint check: T_reb <= 120C
         """
         result = SweepResult(
             parameter_name='pressure',
             fixed_values={'nt': fixed_nt, 'feed': fixed_feed}
         )
-        
+
         p_min, p_max = self.pressure_bounds
         pressures = [
             p_min + i * (p_max - p_min) / (self.pressure_points - 1)
             for i in range(self.pressure_points)
         ]
-        
+
         logger.info("")
         logger.info(f"{'Pressure':^10} {'T_reb':^10} {'TAC':^15} {'Status':^25}")
         logger.info("-" * 60)
-        
+
         best_tac = float('inf')
         best_pressure = p_min
-        
-        for p in pressures:
+        total_points = len(pressures)
+
+        for idx, p in enumerate(pressures):
             point = self._evaluate_with_feasibility(fixed_nt, fixed_feed, p)
             result.points.append(point)
+
+            # Emit progress
+            _emit_progress(
+                iteration=iteration,
+                phase="pressure_sweep",
+                current=idx + 1,
+                total=total_points,
+                best_tac=best_tac if best_tac < float('inf') else None,
+                pressure=round(p, 4),
+                T_reb=round(point.T_reb, 1) if point.T_reb > 0 else None
+            )
             
             # Format status
             if point.feasibility == FeasibilityStatus.FEASIBLE:
@@ -428,12 +510,12 @@ class ISOOptimizer:
                     best_pressure = p
                     status = "*** BEST ***"
             elif point.feasibility == FeasibilityStatus.INFEASIBLE_TEMPERATURE:
-                status = "❌ T_reb > 120°C"
+                status = "[X] T_reb > 120C"
             else:
-                status = f"❌ {point.infeasibility_reason[:20]}"
+                status = f"[X] {point.infeasibility_reason[:20]}"
             
             tac_str = f"${point.tac:,.0f}" if point.tac < 1e10 else "N/A"
-            T_str = f"{point.T_reb:.1f}°C" if point.T_reb > 0 else "N/A"
+            T_str = f"{point.T_reb:.1f}C" if point.T_reb > 0 else "N/A"
             
             logger.info(f"{p:^10.4f} {T_str:^10} {tac_str:^15} {status:^25}")
         
@@ -442,28 +524,29 @@ class ISOOptimizer:
         
         return result
     
-    def _sweep_nt(self, fixed_pressure: float, fixed_feed: int) -> SweepResult:
+    def _sweep_nt(self, fixed_pressure: float, fixed_feed: int, iteration: int = 1) -> SweepResult:
         """
         Sweep NT at fixed pressure and feed.
-        
+
         Generates classic U-shaped TAC curve.
         """
         result = SweepResult(
             parameter_name='nt',
             fixed_values={'pressure': fixed_pressure, 'feed': fixed_feed}
         )
-        
+
         nt_min, nt_max = self.nt_bounds
         nt_values = list(range(nt_min, nt_max + 1, self.nt_step))
-        
+
         logger.info("")
         logger.info(f"{'NT':^8} {'TAC':^15} {'Status':^20}")
         logger.info("-" * 45)
-        
+
         best_tac = float('inf')
         best_nt = nt_min
-        
-        for nt in nt_values:
+        total_points = len(nt_values)
+
+        for idx, nt in enumerate(nt_values):
             # Adjust feed if needed
             adjusted_feed = self._adjust_feed_for_nt(fixed_feed, nt)
             
@@ -472,7 +555,7 @@ class ISOOptimizer:
             
             point = self._evaluate_with_feasibility(nt, adjusted_feed, fixed_pressure)
             result.points.append(point)
-            
+
             if point.feasibility == FeasibilityStatus.FEASIBLE and point.tac < best_tac:
                 best_tac = point.tac
                 best_nt = nt
@@ -480,17 +563,27 @@ class ISOOptimizer:
             elif point.feasibility == FeasibilityStatus.FEASIBLE:
                 status = "OK"
             else:
-                status = f"❌ {point.infeasibility_reason[:15]}"
-            
+                status = f"[X] {point.infeasibility_reason[:15]}"
+
             tac_str = f"${point.tac:,.0f}" if point.tac < 1e10 else "N/A"
             logger.info(f"{nt:^8} {tac_str:^15} {status:^20}")
-        
+
+            # Emit progress
+            _emit_progress(
+                iteration=iteration,
+                phase="nt_sweep",
+                current=idx + 1,
+                total=total_points,
+                best_tac=best_tac if best_tac < float('inf') else None,
+                nt=nt
+            )
+
         result.optimal_value = best_nt
         result.optimal_tac = best_tac
-        
+
         return result
-    
-    def _sweep_feed(self, fixed_pressure: float, fixed_nt: int) -> SweepResult:
+
+    def _sweep_feed(self, fixed_pressure: float, fixed_nt: int, iteration: int = 1) -> SweepResult:
         """
         Sweep feed stage at fixed pressure and NT.
         
@@ -510,15 +603,16 @@ class ISOOptimizer:
             return result
         
         feed_values = list(range(f_min, f_max + 1, self.feed_step))
-        
+
         logger.info("")
         logger.info(f"{'Feed':^8} {'TAC':^15} {'Status':^20}")
         logger.info("-" * 45)
-        
+
         best_tac = float('inf')
         best_feed = f_min
-        
-        for feed in feed_values:
+        total_points = len(feed_values)
+
+        for idx, feed in enumerate(feed_values):
             point = self._evaluate_with_feasibility(fixed_nt, feed, fixed_pressure)
             result.points.append(point)
             
@@ -529,25 +623,35 @@ class ISOOptimizer:
             elif point.feasibility == FeasibilityStatus.FEASIBLE:
                 status = "OK"
             else:
-                status = f"❌ {point.infeasibility_reason[:15]}"
+                status = f"[X] {point.infeasibility_reason[:15]}"
             
             tac_str = f"${point.tac:,.0f}" if point.tac < 1e10 else "N/A"
             logger.info(f"{feed:^8} {tac_str:^15} {status:^20}")
-        
+
+            # Emit progress
+            _emit_progress(
+                iteration=iteration,
+                phase="feed_sweep",
+                current=idx + 1,
+                total=total_points,
+                best_tac=best_tac if best_tac < float('inf') else None,
+                feed=feed
+            )
+
         result.optimal_value = best_feed
         result.optimal_tac = best_tac
-        
+
         return result
-    
+
     # ════════════════════════════════════════════════════════════════════════
     # EVALUATION WITH FEASIBILITY CHECK
     # ════════════════════════════════════════════════════════════════════════
-    
+
     def _evaluate_with_feasibility(self, nt: int, feed: int, pressure: float) -> EvaluationPoint:
         """
         Evaluate a configuration and check feasibility constraints.
-        
-        CRITICAL: Applies temperature constraint T_reb ≤ 120°C
+
+        CRITICAL: Applies temperature constraint T_reb <= 120C
         """
         # Check cache
         key = (nt, feed, round(pressure, 4))
@@ -592,11 +696,11 @@ class ISOOptimizer:
         elif T_reb > self.T_reb_max:
             # CRITICAL: Temperature constraint
             point.feasibility = FeasibilityStatus.INFEASIBLE_TEMPERATURE
-            point.infeasibility_reason = f"T_reb={T_reb:.1f}°C > {self.T_reb_max}°C (polymerization risk)"
+            point.infeasibility_reason = f"T_reb={T_reb:.1f}C > {self.T_reb_max}C (polymerization risk)"
             point.tac = float('inf')  # Exclude from optimization
             self.infeasible_count += 1
             
-            logger.debug(f"  ❌ INFEASIBLE: {point.infeasibility_reason}")
+            logger.debug(f"  [X] INFEASIBLE: {point.infeasibility_reason}")
         
         elif tac >= 1e10:
             point.feasibility = FeasibilityStatus.INFEASIBLE_CONVERGENCE
@@ -667,14 +771,14 @@ class ISOOptimizer:
         logger.info(f"Case: {case_name}")
         logger.info("")
         logger.info("Methodology: TRUE ISO (Professor's requirements)")
-        logger.info("  • Variables optimized ONE AT A TIME: P → NT → NF")
-        logger.info("  • Outer iteration loop with convergence check")
-        logger.info(f"  • Temperature constraint: T_reb ≤ {self.T_reb_max}°C")
+        logger.info("  * Variables optimized ONE AT A TIME: P -> NT -> NF")
+        logger.info("  * Outer iteration loop with convergence check")
+        logger.info(f"  * Temperature constraint: T_reb <= {self.T_reb_max}C")
         logger.info("")
         logger.info("Physical basis:")
-        logger.info("  • Pressure: Strategic (thermodynamic regime)")
-        logger.info("  • NT: Capital vs energy trade-off")
-        logger.info("  • NF: Feed location optimization")
+        logger.info("  * Pressure: Strategic (thermodynamic regime)")
+        logger.info("  * NT: Capital vs energy trade-off")
+        logger.info("  * NF: Feed location optimization")
         logger.info("=" * 70)
     
     def _print_summary(self, result: ISOResult):
@@ -685,7 +789,7 @@ class ISOOptimizer:
         logger.info("=" * 70)
         logger.info("")
         logger.info(f"Case: {result.case_name}")
-        logger.info(f"Converged: {'YES ✓' if result.converged else 'NO'}")
+        logger.info(f"Converged: {'YES [OK]' if result.converged else 'NO'}")
         logger.info(f"Iterations: {result.convergence_iteration}")
         logger.info(f"Time: {result.total_time_seconds:.1f}s ({result.total_time_seconds/60:.1f} min)")
         logger.info("")
@@ -702,7 +806,7 @@ class ISOOptimizer:
         logger.info("-" * 40)
         logger.info(f"  Total evaluations: {result.total_evaluations}")
         logger.info(f"  Feasible: {result.feasible_evaluations}")
-        logger.info(f"  Infeasible (T_reb > {self.T_reb_max}°C): {result.infeasible_evaluations}")
+        logger.info(f"  Infeasible (T_reb > {self.T_reb_max}C): {result.infeasible_evaluations}")
         logger.info("")
         logger.info("=" * 70)
     
@@ -756,8 +860,8 @@ class ISOOptimizer:
         output = {
             'metadata': {
                 'methodology': 'TRUE Iterative Sequential Optimization (ISO)',
-                'description': 'P → NT → NF, one at a time, with outer loop',
-                'temperature_constraint': f'T_reb ≤ {self.T_reb_max}°C',
+                'description': 'P -> NT -> NF, one at a time, with outer loop',
+                'temperature_constraint': f'T_reb <= {self.T_reb_max}C',
                 'convergence_tolerance': self.tac_tolerance,
             },
             'optimal': {
@@ -836,28 +940,28 @@ This module implements TRUE ISO per professor's requirements:
 
 OUTER LOOP (Iterations until convergence):
 ├── STEP 1: Optimize PRESSURE
-│   • Fix NT, NF from previous iteration
-│   • Sweep P with T_reb ≤ 120°C constraint
-│   • Find P* minimizing TAC
-│
+|   * Fix NT, NF from previous iteration
+|   * Sweep P with T_reb <= 120C constraint
+|   * Find P* minimizing TAC
+|
 ├── STEP 2: Optimize NT  
-│   • Fix P = P*, NF from previous iteration
-│   • Sweep NT to generate U-curve
-│   • Find NT* at minimum
-│
+|   * Fix P = P*, NF from previous iteration
+|   * Sweep NT to generate U-curve
+|   * Find NT* at minimum
+|
 └── STEP 3: Optimize NF
-    • Fix P = P*, NT = NT*
-    • Sweep NF to generate U-curve
-    • Find NF* at minimum
+    * Fix P = P*, NT = NT*
+    * Sweep NF to generate U-curve
+    * Find NF* at minimum
 
 CONVERGENCE: When design (P*, NT*, NF*) unchanged
 
 KEY FEATURES:
-✓ Variables optimized ONE AT A TIME
-✓ Outer iteration loop
-✓ Temperature constraint: T_reb ≤ 120°C
-✓ Infeasibility labeling
-✓ U-curves for each variable
+[OK] Variables optimized ONE AT A TIME
+[OK] Outer iteration loop
+[OK] Temperature constraint: T_reb <= 120C
+[OK] Infeasibility labeling
+[OK] U-curves for each variable
 
 """)
     print("=" * 70)

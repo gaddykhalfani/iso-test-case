@@ -26,6 +26,13 @@ from datetime import datetime
 from dataclasses import dataclass
 from typing import List, Dict, Optional
 
+# Initialize COM for Windows subprocess compatibility
+try:
+    import pythoncom
+    pythoncom.CoInitialize()
+except ImportError:
+    pass  # Not on Windows or pythoncom not available
+
 # ════════════════════════════════════════════════════════════════════════════
 # LOGGING SETUP
 # ════════════════════════════════════════════════════════════════════════════
@@ -325,17 +332,17 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
     
     # Print header
     print("")
-    print("╔" + "═" * 68 + "╗")
-    print("║" + " " * 68 + "║")
-    print("║" + "  TRUE ITERATIVE SEQUENTIAL OPTIMIZATION (ISO)".center(68) + "║")
-    print("║" + "  + Multiple U-Curves Generation".center(68) + "║")
-    print("║" + " " * 68 + "║")
-    print("╚" + "═" * 68 + "╝")
+    print("+" + "=" * 68 + "+")
+    print("|" + " " * 68 + "|")
+    print("|" + "  TRUE ITERATIVE SEQUENTIAL OPTIMIZATION (ISO)".center(68) + "|")
+    print("|" + "  + Multiple U-Curves Generation".center(68) + "|")
+    print("|" + " " * 68 + "|")
+    print("+" + "=" * 68 + "+")
     print("")
     print(f"  Case: {case_name}")
     print(f"  Column: {config['column']['block_name']} ({config['column']['description']})")
     print("")
-    print(f"  Temperature constraint: T_reb ≤ {T_REBOILER_MAX}°C")
+    print(f"  Temperature constraint: T_reb <= {T_REBOILER_MAX}C")
     print("")
     print("  Bounds:")
     print(f"    NT: {config['bounds']['nt_bounds']}")
@@ -418,8 +425,8 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
         logger.info("=" * 70)
         logger.info("PHASE 1: ISO OPTIMIZATION")
         logger.info("=" * 70)
-        logger.info("  Variables optimized ONE AT A TIME: P → NT → NF")
-        logger.info(f"  Temperature constraint: T_reb ≤ {T_REBOILER_MAX}°C")
+        logger.info("  Variables optimized ONE AT A TIME: P -> NT -> NF")
+        logger.info(f"  Temperature constraint: T_reb <= {T_REBOILER_MAX}C")
         
         result = optimizer.run(case_name=case_name)
         
@@ -491,9 +498,9 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
         # ─────────────────────────────────────────────────────────────────────
         
         print("")
-        print("╔" + "═" * 68 + "╗")
-        print("║" + "  ISO OPTIMIZATION COMPLETE".center(68) + "║")
-        print("╚" + "═" * 68 + "╝")
+        print("+" + "=" * 68 + "+")
+        print("|" + "  ISO OPTIMIZATION COMPLETE".center(68) + "|")
+        print("+" + "=" * 68 + "+")
         print("")
         print("  OPTIMAL CONFIGURATION:")
         print("  " + "-" * 40)
@@ -504,12 +511,12 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
         print(f"    TAC: ${result.optimal_tac:,.0f}/year")
         print("")
         print("  " + "-" * 40)
-        print(f"    Converged: {'YES ✓' if result.converged else 'NO'}")
+        print(f"    Converged: {'YES' if result.converged else 'NO'}")
         print(f"    Iterations: {result.convergence_iteration}")
         print(f"    Time: {result.total_time_seconds:.1f}s ({result.total_time_seconds/60:.1f} min)")
         print(f"    Evaluations: {result.total_evaluations}")
         print(f"      - Feasible: {result.feasible_evaluations}")
-        print(f"      - Infeasible (T_reb>{T_REBOILER_MAX}°C): {result.infeasible_evaluations}")
+        print(f"      - Infeasible (T_reb>{T_REBOILER_MAX}C): {result.infeasible_evaluations}")
         print("")
         if nt_feed_sweep_results:
             feasible_sweep = len([r for r in nt_feed_sweep_results if r['tac'] < 1e10])
@@ -563,15 +570,15 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
 def print_header():
     """Print program header."""
     print("")
-    print("╔" + "═" * 68 + "╗")
-    print("║" + " " * 68 + "║")
-    print("║" + "  TRUE ITERATIVE SEQUENTIAL OPTIMIZATION (ISO)".center(68) + "║")
-    print("║" + "  FOR DISTILLATION COLUMNS".center(68) + "║")
-    print("║" + " " * 68 + "║")
-    print("║" + "  + Multiple U-Curves Generation".center(68) + "║")
-    print("║" + "  PSE Lab - NTUST".center(68) + "║")
-    print("║" + " " * 68 + "║")
-    print("╚" + "═" * 68 + "╝")
+    print("+" + "=" * 68 + "+")
+    print("|" + " " * 68 + "|")
+    print("|" + "  TRUE ITERATIVE SEQUENTIAL OPTIMIZATION (ISO)".center(68) + "|")
+    print("|" + "  FOR DISTILLATION COLUMNS".center(68) + "|")
+    print("|" + " " * 68 + "|")
+    print("|" + "  + Multiple U-Curves Generation".center(68) + "|")
+    print("|" + "  PSE Lab - NTUST".center(68) + "|")
+    print("|" + " " * 68 + "|")
+    print("+" + "=" * 68 + "+")
     print("")
 
 
@@ -660,14 +667,14 @@ def interactive_menu():
     print("METHODOLOGY: TRUE Iterative Sequential Optimization")
     print("-" * 60)
     print("  PHASE 1 - ISO:")
-    print("    Step 1: Optimize P (T_reb ≤ 120°C constraint)")
+    print("    Step 1: Optimize P (T_reb <= 120C constraint)")
     print("    Step 2: Optimize NT (at P*)")
     print("    Step 3: Optimize NF (at P*, NT*)")
-    print("    → Repeat until converged")
+    print("    -> Repeat until converged")
     print("")
     print("  PHASE 2 - Post-ISO Sweep:")
     print("    Sweep NT-Feed combinations AROUND optimal point")
-    print("    → Generates multiple U-curves for thesis")
+    print("    -> Generates multiple U-curves for thesis")
     print("-" * 60)
     print("")
     
@@ -717,12 +724,28 @@ def interactive_menu():
 
 def main():
     """Main entry point."""
+    # Debug: Print immediately to confirm script started
+    print("=" * 60, flush=True)
+    print("ISO OPTIMIZER STARTING...", flush=True)
+    print(f"Arguments: {sys.argv}", flush=True)
+    print(f"Working directory: {os.getcwd()}", flush=True)
+    print("=" * 60, flush=True)
+
     if len(sys.argv) > 1:
         case_name = sys.argv[1]
+        print(f"Case name: {case_name}", flush=True)
         # Check for --no-sweep flag
         run_sweep = '--no-sweep' not in sys.argv
         print_header()
-        run_iso_optimization(case_name, run_post_sweep=run_sweep)
+        result = run_iso_optimization(case_name, run_post_sweep=run_sweep)
+
+        # Exit with proper code
+        if result is None:
+            logger.error("Optimization failed!")
+            sys.exit(1)
+        else:
+            logger.info("Optimization completed successfully!")
+            sys.exit(0)
     else:
         interactive_menu()
 

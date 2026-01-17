@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Aspen Plus temporary files
+_*.ads
+_*.appdf
+_*.apprj
+_*.bks
+_*.co1
+_*.co2
+_*.cod
+_*.def
+_*.dfm
+_*.dyl
+_*.edf
+_*.for
+_*.gen
+_*.his
+_*.ia2
+_*.ikc
+_*.in0
+_*.inm
+_*.inx
+_*.itd
+_*.jnl
+_*.nin
+_*.nis
+_*.nol
+_*.odi
+_*.plf
+_*.prd
+_*.rp1
+_*.rp2
+_*.scr
+_*.sin
+_*.sor
+_*.sum
+
+# Aspen dump files
+aspenplus_*.dmp
+*.dmp
+
+# Backup files
+*.bkp
+$backup.bkp
+
+# XML settings
+commonshellsettings.xml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project specific
+my-project/
+*.apw

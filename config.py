@@ -16,7 +16,7 @@ from typing import Tuple, Dict, Optional
 # BASE DIRECTORY CONFIGURATION
 # ════════════════════════════════════════════════════════════════════════════
 
-BASE_DIR = r"C:/Users/pse/Desktop/test/Fix yang ini/iso test case"
+BASE_DIR = r"C:/Users/pse/Desktop/test/Fix yang ini/iso test case/iso-test-case/"
 
 # ════════════════════════════════════════════════════════════════════════════
 # SEQUENCE FILES - Map sequence cases to their Aspen files

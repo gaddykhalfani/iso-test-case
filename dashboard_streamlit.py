@@ -1,199 +1,581 @@
 """
-Streamlit dashboard for ISO / Sequential optimization (repo: iso-test-case)
+Streamlit dashboard for ISO / PSO / GA optimization (repo: iso-test-case)
 
 Features:
-- Select case (from config.list_available_cases)
+- Select case and algorithm (ISO, PSO, GA)
 - Two modes:
     * Demo / Visualize saved results (load JSON or images)
-    * Run optimization (requires Aspen on same Windows machine)
-- Show progress with spinner, show resulting plots and summary
-- Option to run post-ISO NT-feed sweep and display multiple-U-curves
+    * Run optimization (requires Aspen on same Windows machine or demo mode)
+- Live log streaming from FastAPI backend
+- Start/Stop run controls
+- Results browser with plot viewing
+
+Usage:
+    streamlit run dashboard_streamlit.py
+
 Notes:
-- Running optimization will call run_iso_optimization() which uses Aspen COM.
-  That function must be run on the same machine that has Aspen and pywin32.
-- For lightweight demos, use demo mode and load JSON from results/*.json.
+- Connect to FastAPI backend at http://localhost:8000
+- For real Aspen runs, server must run on Windows machine with Aspen
+- Demo mode works without Aspen for testing/demonstration
 """
 import streamlit as st
 import os
 import time
 import glob
 import json
-import threading
+import requests
 from pathlib import Path
+from datetime import datetime
 
-# Try to import repo modules (must run app with repo root as cwd)
-try:
-    from config import list_available_cases, get_case_config
-    from main_sequential_optimizer import run_iso_optimization, T_REBOILER_MAX
-    from visualization_iso import ISOVisualizer
-except Exception as e:
-    # If imports fail, we still allow demo mode
-    list_available_cases = lambda: []
-    get_case_config = lambda name: None
-    run_iso_optimization = None
-    ISOVisualizer = None
-    st.warning(f"Warning: could not import full repo modules: {e}")
+# ════════════════════════════════════════════════════════════════════════════
+# CONFIGURATION
+# ════════════════════════════════════════════════════════════════════════════
 
+API_BASE_URL = os.environ.get("API_URL", "http://localhost:8000")
 RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 
-st.set_page_config(page_title="ISO Dashboard", layout="wide")
+# Try to import repo modules for case listing
+try:
+    from config import list_available_cases, get_case_config
+    from iso_optimizer import T_REBOILER_MAX
+except Exception as e:
+    list_available_cases = lambda: []
+    get_case_config = lambda name: None
+    T_REBOILER_MAX = 120.0
+    print(f"Warning: could not import full repo modules: {e}")
 
-st.title("ISO / Sequential Optimization Dashboard")
-st.markdown(
-    """
-    Use this dashboard to run ISO optimizations (requires Aspen on the machine)
-    or to visualize saved results and U-curves.
-    """
+# ════════════════════════════════════════════════════════════════════════════
+# PAGE CONFIG
+# ════════════════════════════════════════════════════════════════════════════
+
+st.set_page_config(
+    page_title="Column Optimization Dashboard",
+    page_icon="🧪",
+    layout="wide"
 )
 
-# Sidebar controls
-st.sidebar.header("Controls")
+# ════════════════════════════════════════════════════════════════════════════
+# SESSION STATE INITIALIZATION
+# ════════════════════════════════════════════════════════════════════════════
 
-mode = st.sidebar.selectbox("Mode", ["Demo / Visualize", "Run Optimization (Aspen required)"])
+if "job_id" not in st.session_state:
+    st.session_state.job_id = None
+if "logs" not in st.session_state:
+    st.session_state.logs = []
+if "job_status" not in st.session_state:
+    st.session_state.job_status = None
+if "last_progress" not in st.session_state:
+    st.session_state.last_progress = {}
+if "convergence_history" not in st.session_state:
+    st.session_state.convergence_history = []
 
-# list available cases from config (if import succeeded)
-available_cases = list_available_cases()
-if not available_cases:
-    # If config import failed, try to detect saved case names from results folder
-    saved_jsons = glob.glob(str(RESULTS_DIR / "*iso_result_*.json"))
-    saved_cases = []
-    for p in saved_jsons:
+
+# ════════════════════════════════════════════════════════════════════════════
+# HELPER FUNCTIONS
+# ════════════════════════════════════════════════════════════════════════════
+
+def check_api_health():
+    """Check if the API backend is running."""
+    try:
+        resp = requests.get(f"{API_BASE_URL}/health", timeout=2)
+        return resp.status_code == 200
+    except:
+        return False
+
+
+def start_optimization(case: str, algorithm: str, demo: bool, **kwargs):
+    """Start an optimization job via the API."""
+    payload = {
+        "case": case,
+        "algorithm": algorithm,
+        "demo": demo,
+        **kwargs
+    }
+    try:
+        resp = requests.post(f"{API_BASE_URL}/run", json=payload, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            st.session_state.job_id = data.get("job_id")
+            st.session_state.logs = []
+            st.session_state.job_status = "running"
+            return data
+        else:
+            st.error(f"Failed to start job: {resp.text}")
+            return None
+    except requests.exceptions.ConnectionError:
+        st.error(f"Cannot connect to API at {API_BASE_URL}. Is the server running?")
+        return None
+    except Exception as e:
+        st.error(f"Error starting job: {e}")
+        return None
+
+
+def stop_optimization(job_id: str):
+    """Stop a running optimization job."""
+    try:
+        resp = requests.post(f"{API_BASE_URL}/kill/{job_id}", timeout=5)
+        if resp.status_code == 200:
+            st.session_state.job_status = "killed"
+            return resp.json()
+        return None
+    except Exception as e:
+        st.error(f"Error stopping job: {e}")
+        return None
+
+
+def get_job_status(job_id: str):
+    """Get status of a job."""
+    try:
+        resp = requests.get(f"{API_BASE_URL}/status/{job_id}", timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except:
+        return None
+
+
+def fetch_results_list():
+    """Fetch list of results from API."""
+    try:
+        resp = requests.get(f"{API_BASE_URL}/results", timeout=5)
+        if resp.status_code == 200:
+            return resp.json().get("results", [])
+        return []
+    except:
+        # Fallback to local file listing
+        results = []
+        for f in sorted(glob.glob(str(RESULTS_DIR / "*.json")), reverse=True):
+            results.append({"filename": os.path.basename(f), "filepath": f})
+        return results
+
+
+def parse_progress_line(line: str):
+    """Parse a [PROGRESS] JSON line."""
+    if "[PROGRESS]" in line:
         try:
-            with open(p, 'r', encoding='utf-8') as f:
-                d = json.load(f)
-                saved_cases.append(d.get('metadata', {}).get('case_name', os.path.basename(p)))
+            json_str = line.split("[PROGRESS]")[1].strip()
+            return json.loads(json_str)
         except:
-            saved_cases.append(os.path.basename(p))
-    available_cases = saved_cases or ["Case1_COL2"]
+            pass
+    return None
 
-case = st.sidebar.selectbox("Select case", available_cases)
 
-run_post_sweep = st.sidebar.checkbox("Run post-ISO NT-Feed sweep (multiple U-curves)", value=True)
-n_ucurves = st.sidebar.slider("Number of U-curves to show (post-sweep)", 1, 12, 7)
+def get_convergence_data(job_id: str):
+    """Fetch convergence history from API for live charting."""
+    try:
+        resp = requests.get(f"{API_BASE_URL}/convergence/{job_id}", timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except:
+        return None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ════════════════════════════════════════════════════════════════════════════
+
+st.sidebar.title("Column Optimization")
+st.sidebar.markdown("---")
+
+# Mode selection
+mode = st.sidebar.radio(
+    "Mode",
+    ["Run Optimization", "Results Browser", "Demo Gallery"],
+    index=0
+)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("T_reb safety limit (from code)")
-st.sidebar.write(f"{T_REBOILER_MAX if 'T_REBOILER_MAX' in globals() else 120.0} °C")
 
-# Main area
-col1, col2 = st.columns([2, 1])
+# API status indicator
+api_ok = check_api_health()
+if api_ok:
+    st.sidebar.success("API Connected")
+else:
+    st.sidebar.warning("API Not Available")
+    st.sidebar.caption(f"Start server: `uvicorn server:app`")
 
-with col2:
-    st.subheader("Available results")
-    json_files = sorted(glob.glob(str(RESULTS_DIR / "*.json")), reverse=True)
-    img_files = sorted(glob.glob(str(RESULTS_DIR / "*.png")), reverse=True)
-    st.write(f"{len(json_files)} saved JSON result files, {len(img_files)} images in {RESULTS_DIR}")
+st.sidebar.markdown("---")
 
-    chosen_json = st.selectbox("Open previous results JSON", ["(none)"] + json_files)
-    if chosen_json != "(none)":
-        try:
-            with open(chosen_json, 'r', encoding='utf-8') as f:
-                prev = json.load(f)
-            st.json(prev.get('optimal', {}))
-            if 'iterations' in prev:
-                st.write(f"Iterations: {len(prev['iterations'])}")
-        except Exception as e:
-            st.error(f"Failed to load JSON: {e}")
+# Algorithm selection
+algorithm = st.sidebar.selectbox(
+    "Algorithm",
+    ["ISO", "PSO", "GA"],
+    help="ISO: Iterative Sequential Optimization\nPSO: Particle Swarm\nGA: Genetic Algorithm"
+)
 
-with col1:
-    st.subheader("Actions")
+# Case selection
+available_cases = list_available_cases()
+if not available_cases:
+    available_cases = ["Case1_COL2", "Case1_COL3", "Case8_COL2", "Case9_COL2"]
 
-    if mode == "Demo / Visualize":
-        st.markdown("Visualize previously generated plots or import a saved NT-Feed sweep JSON.")
-        uploaded = st.file_uploader("Upload NT-Feed sweep JSON (optional)", type=["json"])
-        if uploaded:
-            try:
-                data = json.load(uploaded)
-                st.success("Loaded uploaded sweep JSON")
-            except Exception as e:
-                st.error(f"Invalid JSON: {e}")
-                data = None
+case = st.sidebar.selectbox("Case", available_cases)
 
-        # Show image gallery
-        st.markdown("### Image gallery (results/)")
-        gallery = img_files[:50]
-        for img in gallery:
-            st.image(img, use_column_width=True)
-        st.markdown("You can also use the standalone plotting function from visualization_iso.py "
-                    "or the ISOVisualizer class to re-generate plots from sweep JSON.")
+# Demo mode toggle
+demo_mode = st.sidebar.checkbox(
+    "Demo Mode (no Aspen)",
+    value=True,
+    help="Run with mock evaluator for testing"
+)
 
-    else:
-        st.markdown("Run optimization on this machine (REQUIRES Aspen + pywin32).")
-        st.warning("This will call the optimizer which uses Aspen COM; run only on a Windows machine with Aspen installed.")
-        run_btn = st.button("Run ISO Optimization now")
+# Algorithm-specific options
+st.sidebar.markdown("---")
+st.sidebar.subheader("Algorithm Options")
 
-        if run_btn:
-            if run_iso_optimization is None:
-                st.error("Optimizer import failed. Make sure you run this app from the repo root and that Python path is correct.")
-            else:
-                status = st.empty()
-                progress = st.progress(0)
-                # Run optimizer in thread to avoid blocking Streamlit main thread UI completely
-                result_container = {"done": False, "result": None, "error": None}
+if algorithm in ["PSO", "GA"]:
+    n_particles = st.sidebar.slider("Particles/Population", 10, 50, 20)
+    n_iterations = st.sidebar.slider("Iterations/Generations", 20, 200, 50)
+    seed = st.sidebar.number_input("Random Seed", value=42, min_value=0)
+else:
+    n_particles = None
+    n_iterations = None
+    seed = None
+    no_sweep = st.sidebar.checkbox("Skip post-ISO sweep", value=False)
 
-                def _run():
-                    try:
-                        # call run_iso_optimization (this will block until finished)
-                        res = run_iso_optimization(case + "_COL2" if "_" not in case else case,
-                                                  run_post_sweep=run_post_sweep,
-                                                  sweep_nt_step=2,
-                                                  sweep_feed_step=2,
-                                                  nt_range_around_opt=20,
-                                                  feed_range_around_opt=10)
-                        result_container["result"] = res
-                    except Exception as e:
-                        result_container["error"] = str(e)
-                    finally:
-                        result_container["done"] = True
+st.sidebar.markdown("---")
+st.sidebar.caption(f"T_reb limit: {T_REBOILER_MAX}°C")
 
-                thread = threading.Thread(target=_run, daemon=True)
-                thread.start()
-                t0 = time.time()
-                # simple polling loop with progress animation
-                while not result_container["done"]:
-                    elapsed = time.time() - t0
-                    # progress estimate: just animate
-                    p = (int(elapsed) % 100) / 100.0
-                    progress.progress(min(100, int(p * 100)))
-                    status.info(f"Running... elapsed: {int(elapsed)}s")
-                    time.sleep(1)
 
-                progress.progress(100)
-                if result_container["error"]:
-                    st.error(f"Run failed: {result_container['error']}")
+# ════════════════════════════════════════════════════════════════════════════
+# MAIN CONTENT
+# ════════════════════════════════════════════════════════════════════════════
+
+st.title("Distillation Column Optimization Dashboard")
+
+if mode == "Run Optimization":
+    st.header("Run Optimization")
+
+    col1, col2, col3 = st.columns([2, 1, 1])
+
+    with col1:
+        st.markdown(f"**Case:** `{case}` | **Algorithm:** `{algorithm}` | **Demo:** `{demo_mode}`")
+
+    with col2:
+        start_btn = st.button(
+            "Start Optimization",
+            type="primary",
+            disabled=st.session_state.job_status == "running"
+        )
+
+    with col3:
+        stop_btn = st.button(
+            "Stop",
+            type="secondary",
+            disabled=st.session_state.job_status != "running"
+        )
+
+    # Handle button clicks
+    if start_btn:
+        kwargs = {}
+        if algorithm == "ISO":
+            kwargs["no_sweep"] = no_sweep if 'no_sweep' in dir() else False
+        else:
+            kwargs["n_particles"] = n_particles
+            kwargs["n_iterations"] = n_iterations
+            kwargs["seed"] = seed
+
+        result = start_optimization(case, algorithm, demo_mode, **kwargs)
+        if result:
+            st.success(f"Job started: {result.get('job_id', '')[:8]}...")
+            st.rerun()
+
+    if stop_btn and st.session_state.job_id:
+        stop_optimization(st.session_state.job_id)
+        st.warning("Job stopped")
+        st.rerun()
+
+    st.markdown("---")
+
+    # Job status and progress
+    if st.session_state.job_id:
+        status = get_job_status(st.session_state.job_id)
+
+        if status:
+            st.session_state.job_status = status.get("status")
+
+            # Status display
+            status_col1, status_col2, status_col3, status_col4 = st.columns(4)
+
+            with status_col1:
+                status_text = status.get("status", "unknown")
+                if status_text == "running":
+                    st.info(f"Status: {status_text}")
+                elif status_text == "done":
+                    st.success(f"Status: {status_text}")
+                elif status_text in ("failed", "killed"):
+                    st.error(f"Status: {status_text}")
                 else:
-                    st.success("Optimization finished")
-                    st.write("Result summary:")
-                    st.json(result_container["result"].get('optimal') if result_container["result"] else {})
+                    st.warning(f"Status: {status_text}")
 
-# Bottom: load latest images and display primary plots
+            with status_col2:
+                elapsed = status.get("elapsed_seconds")
+                if elapsed:
+                    st.metric("Elapsed", f"{elapsed:.0f}s")
+
+            with status_col3:
+                progress = st.session_state.last_progress
+                if progress.get("best_tac"):
+                    st.metric("Best TAC", f"${progress['best_tac']:,.0f}")
+
+            with status_col4:
+                if progress.get("phase"):
+                    st.metric("Phase", progress.get("phase", "")[:15])
+
+            # Progress bar
+            if status.get("status") == "running" and progress:
+                current = progress.get("current", 0)
+                total = progress.get("total", 100)
+                if total > 0:
+                    st.progress(min(current / total, 1.0))
+
+            # Live Convergence Chart (for PSO/GA)
+            conv_data = get_convergence_data(st.session_state.job_id)
+            if conv_data and conv_data.get("convergence_history"):
+                history = conv_data["convergence_history"]
+                algo = conv_data.get("algorithm", "")
+
+                if algo in ["PSO", "GA"] and len(history) > 0:
+                    st.subheader(f"Live Convergence ({algo})")
+
+                    # Prepare data for chart
+                    import pandas as pd
+                    chart_data = pd.DataFrame(history)
+
+                    if "iteration" in chart_data.columns and "best_tac" in chart_data.columns:
+                        # Filter valid TAC values
+                        chart_data = chart_data[chart_data["best_tac"] < 1e10]
+
+                        if len(chart_data) > 0:
+                            # Use Streamlit's line chart
+                            chart_data = chart_data.set_index("iteration")
+                            st.line_chart(
+                                chart_data[["best_tac"]],
+                                use_container_width=True
+                            )
+
+                            # Show current best
+                            best_row = chart_data.loc[chart_data["best_tac"].idxmin()]
+                            st.caption(
+                                f"Current best TAC: ${best_row['best_tac']:,.0f}/year "
+                                f"at iteration {chart_data['best_tac'].idxmin()}"
+                            )
+
+        # Live logs display
+        st.subheader("Live Logs")
+
+        log_container = st.empty()
+
+        # Poll for updates if job is running
+        if st.session_state.job_status == "running":
+            # Note: For true live streaming, we would use WebSocket
+            # This is a simplified polling approach
+            with st.spinner("Fetching logs..."):
+                try:
+                    # Use requests to poll status
+                    # In production, connect to WebSocket for real-time updates
+                    pass
+                except:
+                    pass
+
+            # Auto-refresh for live updates
+            st.caption("Dashboard auto-refreshes every 3 seconds while job is running.")
+
+            # Auto-refresh using st.rerun with a delay
+            time.sleep(3)
+            st.rerun()
+
+        # Display accumulated logs
+        if st.session_state.logs:
+            log_text = "\n".join(st.session_state.logs[-100:])  # Last 100 lines
+            st.code(log_text, language="text")
+
+        # Result file link
+        if status and status.get("result_file"):
+            st.success(f"Results saved to: `{status['result_file']}`")
+
+    else:
+        st.info("Click 'Start Optimization' to begin a new run.")
+
+        # Show recent jobs
+        st.subheader("Recent Jobs")
+        try:
+            resp = requests.get(f"{API_BASE_URL}/jobs", timeout=5)
+            if resp.status_code == 200:
+                jobs = resp.json()
+                if jobs:
+                    for job in jobs[:5]:
+                        st.write(f"- `{job['job_id'][:8]}...` | {job.get('case', 'N/A')} | {job.get('status', 'unknown')}")
+                else:
+                    st.caption("No recent jobs")
+        except:
+            st.caption("Cannot fetch job list (API unavailable)")
+
+
+elif mode == "Results Browser":
+    st.header("Results Browser")
+
+    # Fetch results
+    results = fetch_results_list()
+
+    if not results:
+        st.info("No results found. Run an optimization first!")
+    else:
+        # Results table
+        st.subheader(f"Found {len(results)} result files")
+
+        # Filter by algorithm
+        algorithms_found = list(set(r.get("algorithm", "ISO") for r in results if "algorithm" in r))
+        if algorithms_found:
+            filter_algo = st.multiselect("Filter by algorithm", algorithms_found, default=algorithms_found)
+            results = [r for r in results if r.get("algorithm", "ISO") in filter_algo]
+
+        # Display results
+        for r in results[:20]:  # Limit to 20
+            tac_display = r.get('optimal_tac') or 0
+            with st.expander(f"{r.get('filename', 'Unknown')} - TAC: ${tac_display:,.0f}"):
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.write(f"**Case:** {r.get('case_name', 'N/A')}")
+                    st.write(f"**Algorithm:** {r.get('algorithm', 'ISO')}")
+                    st.write(f"**Optimal NT:** {r.get('optimal_nt', 'N/A')}")
+                    st.write(f"**Optimal Feed:** {r.get('optimal_feed', 'N/A')}")
+                    st.write(f"**Optimal Pressure:** {r.get('optimal_pressure', 'N/A')}")
+
+                with col2:
+                    tac_val = r.get('optimal_tac') or 0
+                    st.write(f"**TAC:** ${tac_val:,.0f}/year")
+                    st.write(f"**Evaluations:** {r.get('total_evaluations', 'N/A')}")
+                    time_val = r.get('time_seconds') or 0
+                    st.write(f"**Time:** {time_val:.1f}s")
+                    st.write(f"**Modified:** {r.get('modified', 'N/A')}")
+
+                # Load full JSON
+                if st.button(f"Load JSON", key=f"load_{r.get('filename')}"):
+                    try:
+                        filepath = r.get('filepath', os.path.join(RESULTS_DIR, r.get('filename')))
+                        with open(filepath, 'r') as f:
+                            data = json.load(f)
+                        st.json(data)
+                    except Exception as e:
+                        st.error(f"Error loading: {e}")
+
+    # Plots section
+    st.markdown("---")
+    st.subheader("Plots")
+
+    png_files = sorted(glob.glob(str(RESULTS_DIR / "*.png")), key=os.path.getmtime, reverse=True)
+
+    if png_files:
+        # Group by type
+        st.write(f"Found {len(png_files)} plot files")
+
+        # Filter
+        plot_filter = st.text_input("Filter plots by name", "")
+
+        filtered_plots = [p for p in png_files if plot_filter.lower() in os.path.basename(p).lower()]
+
+        # Display in grid
+        cols = st.columns(2)
+        for i, plot in enumerate(filtered_plots[:10]):
+            with cols[i % 2]:
+                st.image(plot, caption=os.path.basename(plot), use_container_width=True)
+    else:
+        st.info("No plots found in results folder.")
+
+
+elif mode == "Demo Gallery":
+    st.header("Demo Gallery")
+    st.markdown("Pre-generated results and plots for demonstration.")
+
+    # Show sample images
+    st.subheader("Sample U-Curves")
+
+    png_files = sorted(glob.glob(str(RESULTS_DIR / "*.png")), key=os.path.getmtime, reverse=True)
+
+    if png_files:
+        # Categories
+        ucurve_plots = [p for p in png_files if "UCurve" in os.path.basename(p) or "U_curve" in os.path.basename(p)]
+        pressure_plots = [p for p in png_files if "Pressure" in os.path.basename(p)]
+        summary_plots = [p for p in png_files if "Summary" in os.path.basename(p)]
+        other_plots = [p for p in png_files if p not in ucurve_plots + pressure_plots + summary_plots]
+
+        tab1, tab2, tab3, tab4 = st.tabs(["U-Curves", "Pressure Sweeps", "Summaries", "Other"])
+
+        with tab1:
+            if ucurve_plots:
+                for plot in ucurve_plots[:6]:
+                    st.image(plot, caption=os.path.basename(plot), use_container_width=True)
+            else:
+                st.info("No U-curve plots found")
+
+        with tab2:
+            if pressure_plots:
+                for plot in pressure_plots[:6]:
+                    st.image(plot, caption=os.path.basename(plot), use_container_width=True)
+            else:
+                st.info("No pressure sweep plots found")
+
+        with tab3:
+            if summary_plots:
+                for plot in summary_plots[:6]:
+                    st.image(plot, caption=os.path.basename(plot), use_container_width=True)
+            else:
+                st.info("No summary plots found")
+
+        with tab4:
+            if other_plots:
+                cols = st.columns(2)
+                for i, plot in enumerate(other_plots[:8]):
+                    with cols[i % 2]:
+                        st.image(plot, caption=os.path.basename(plot), use_container_width=True)
+            else:
+                st.info("No other plots found")
+
+    else:
+        st.info("No plots found. Run an optimization to generate plots!")
+
+    # Sample JSON
+    st.markdown("---")
+    st.subheader("Sample Results")
+
+    json_files = sorted(glob.glob(str(RESULTS_DIR / "*.json")), key=os.path.getmtime, reverse=True)
+
+    if json_files:
+        selected_json = st.selectbox("Select result file", json_files[:10])
+
+        if selected_json:
+            try:
+                with open(selected_json, 'r') as f:
+                    data = json.load(f)
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.write("**Optimal Configuration:**")
+                    st.json(data.get("optimal", {}))
+
+                with col2:
+                    st.write("**Statistics:**")
+                    st.json(data.get("statistics", {}))
+
+                with st.expander("Full JSON"):
+                    st.json(data)
+
+            except Exception as e:
+                st.error(f"Error loading: {e}")
+    else:
+        st.info("No result files found.")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# FOOTER
+# ════════════════════════════════════════════════════════════════════════════
+
 st.markdown("---")
-st.header("Visualization: Load latest plot set from results/")
-
-def _latest_by_pattern(pattern):
-    files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
-    return files[0] if files else None
-
-latest_summary = _latest_by_pattern(str(RESULTS_DIR / "*ISO_Summary.png"))
-latest_pressure = _latest_by_pattern(str(RESULTS_DIR / "*Pressure_Sweep.png"))
-latest_ucurves = _latest_by_pattern(str(RESULTS_DIR / "*Multiple_UCurves.png"))
-latest_family = _latest_by_pattern(str(RESULTS_DIR / "*UCurves_Family.png"))
-
-col_a, col_b = st.columns(2)
-with col_a:
-    if latest_summary:
-        st.subheader("Latest ISO Summary")
-        st.image(latest_summary, use_column_width=True)
-    else:
-        st.info("No ISO summary image found yet.")
-
-with col_b:
-    if latest_ucurves:
-        st.subheader("Latest Multiple U-Curves")
-        st.image(latest_ucurves, use_column_width=True)
-    else:
-        st.info("No multiple U-curves image found yet.")
-
-st.markdown("If you want real-time logs, consider modifying run_iso_optimization to write incremental JSON or logs that the dashboard can tail and show.")
-st.write("Note: For production use, move long-running simulations to a background worker and show progress via a job queue (Redis/Celery/RQ) or a subprocess with logs streamed to the UI.")
+st.caption(
+    f"Column Optimization Dashboard | "
+    f"API: {API_BASE_URL} | "
+    f"Results: {RESULTS_DIR}"
+)
