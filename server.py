@@ -235,11 +235,20 @@ async def start_run(payload: Dict):
         if algorithm == "ISO":
             if no_sweep:
                 cmd.append("--no-sweep")
-        elif algorithm in ("PSO", "GA"):
+        elif algorithm == "PSO":
             if n_particles:
                 cmd.extend(["--n-particles", str(n_particles)])
             if n_iterations:
                 cmd.extend(["--n-iterations", str(n_iterations)])
+            if seed:
+                cmd.extend(["--seed", str(seed)])
+            if demo:
+                cmd.append("--demo")
+        elif algorithm == "GA":
+            if n_particles:  # Used as pop_size for GA
+                cmd.extend(["--pop-size", str(n_particles)])
+            if n_iterations:  # Used as n_generations for GA
+                cmd.extend(["--n-generations", str(n_iterations)])
             if seed:
                 cmd.extend(["--seed", str(seed)])
             if demo:
