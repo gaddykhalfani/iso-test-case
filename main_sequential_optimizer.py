@@ -76,7 +76,7 @@ log_file, run_timestamp = setup_logging()
 logger = logging.getLogger(__name__)
 
 # Import modules
-from config import get_case_config, list_available_cases
+from config import get_case_config, list_available_cases, create_run_output_dir
 from aspen_interface import AspenEnergyOptimizer
 from tac_calculator import TACCalculator
 from tac_evaluator import TACEvaluator
@@ -321,7 +321,7 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
     if config is None:
         logger.error(f"Unknown case: {case_name}")
         return None
-    
+
     # Apply overrides
     if config_overrides:
         for key, value in config_overrides.items():
@@ -329,7 +329,11 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
                 config['bounds'][key] = value
             else:
                 config[key] = value
-    
+
+    # Create run-specific output directory
+    run_output_dir = create_run_output_dir(case_name)
+    logger.info(f"Output directory: {run_output_dir}")
+
     # Print header
     print("")
     print("+" + "=" * 68 + "+")
@@ -455,9 +459,9 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
         
         logger.info("")
         logger.info("Generating plots...")
-        
-        visualizer = ISOVisualizer(output_dir="results")
-        
+
+        visualizer = ISOVisualizer(output_dir=run_output_dir)
+
         # Get optimal dict for visualization
         optimal = None
         if result:
@@ -483,12 +487,12 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
         logger.info("")
         logger.info("Saving results...")
         
-        results_file = optimizer.save_results(output_dir="results")
-        
+        results_file = optimizer.save_results(output_dir=run_output_dir)
+
         # Save sweep data separately if generated
         if nt_feed_sweep_results:
             import json
-            sweep_file = os.path.join("results", f"{case_name}_NT_Feed_Sweep.json")
+            sweep_file = os.path.join(run_output_dir, f"{case_name}_NT_Feed_Sweep.json")
             with open(sweep_file, 'w') as f:
                 json.dump(nt_feed_sweep_results, f, indent=2)
             logger.info(f"  Saved sweep data: {sweep_file}")
@@ -524,17 +528,29 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
             print(f"    Points evaluated: {len(nt_feed_sweep_results)}")
             print(f"    Feasible points: {feasible_sweep}")
         print("")
+        print("  OUTPUT FOLDER:")
+        print(f"    {run_output_dir}")
+        print("")
         print("  OUTPUT FILES:")
-        print(f"    Results: {results_file}")
-        print(f"    Log: {log_file}")
+        print(f"    Results: {os.path.basename(results_file)}")
+        print(f"    Log: {os.path.basename(log_file)}")
         print(f"    Plots: {len(plot_files)} files")
         for pf in plot_files:
             print(f"      - {os.path.basename(pf)}")
         print("")
         print("=" * 70)
-        
+
+        # Copy log file to run output directory
+        import shutil
+        log_copy = os.path.join(run_output_dir, os.path.basename(log_file))
+        try:
+            shutil.copy2(log_file, log_copy)
+        except Exception:
+            pass  # Log file copy is best-effort
+
         return {
             'case_name': case_name,
+            'output_dir': run_output_dir,
             'optimal': {
                 'nt': result.optimal_nt,
                 'feed': result.optimal_feed,

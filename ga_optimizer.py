@@ -183,7 +183,7 @@ if PYMOO_AVAILABLE:
                 result = self.evaluator.evaluate(nt, feed, pressure)
 
                 tac = result.get('TAC', 1e12)
-                T_reb = result.get('T_reb', 0)
+                T_reb = result.get('T_reb') or 0  # Handle None from failed simulations
                 converged = result.get('converged', False)
 
                 # Track statistics
@@ -557,7 +557,7 @@ class SimpleGAOptimizer:
                 self.eval_count += 1
 
                 tac = result.get('TAC', 1e12)
-                T_reb = result.get('T_reb', 0)
+                T_reb = result.get('T_reb') or 0  # Handle None from failed simulations
                 converged = result.get('converged', False)
 
                 if converged and T_reb <= self.T_reb_max:
@@ -626,7 +626,7 @@ class SimpleGAOptimizer:
             optimal_feed=int(best_individual[1]) if best_individual is not None else 0,
             optimal_pressure=round(best_individual[2], 4) if best_individual is not None else 0,
             optimal_tac=best_fitness,
-            optimal_T_reb=best_result.get('T_reb', 0) if best_result else 0,
+            optimal_T_reb=(best_result.get('T_reb') or 0) if best_result else 0,
             convergence_history=[c for c in self.convergence_history if c is not None],
             total_time_seconds=total_time,
             total_evaluations=self.eval_count,
@@ -692,9 +692,14 @@ def main():
     parser.add_argument("--pop-size", type=int, default=50, help="Population size")
     parser.add_argument("--n-generations", type=int, default=100, help="Number of generations")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--output", default="results", help="Output directory")
+    parser.add_argument("--output", default="results", help="Base output directory")
 
     args = parser.parse_args()
+
+    # Create run-specific output directory
+    from config import create_run_output_dir
+    run_output_dir = create_run_output_dir(f"{args.case}_GA", args.output)
+    logger.info(f"Output directory: {run_output_dir}")
 
     # Load configuration
     try:
@@ -780,12 +785,12 @@ def main():
         result = optimizer.run(args.case)
 
         # Save results
-        filename = optimizer.save_results(args.output)
+        filename = optimizer.save_results(run_output_dir)
 
         # Generate convergence plots
         try:
             from visualization_metaheuristic import MetaheuristicVisualizer
-            visualizer = MetaheuristicVisualizer(args.output)
+            visualizer = MetaheuristicVisualizer(run_output_dir)
 
             # Convergence plot
             conv_plot = visualizer.plot_convergence(

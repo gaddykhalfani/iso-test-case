@@ -322,9 +322,9 @@ class PSOOptimizer:
             optimal_feed=optimal_feed,
             optimal_pressure=round(optimal_pressure, 4),
             optimal_tac=gbest_fitness,
-            optimal_T_reb=gbest_result.get('T_reb', 0) if gbest_result else 0,
-            optimal_tpc=gbest_result.get('TPC', 0) if gbest_result else 0,
-            optimal_toc=gbest_result.get('TOC', 0) if gbest_result else 0,
+            optimal_T_reb=(gbest_result.get('T_reb') or 0) if gbest_result else 0,
+            optimal_tpc=(gbest_result.get('TPC') or 0) if gbest_result else 0,
+            optimal_toc=(gbest_result.get('TOC') or 0) if gbest_result else 0,
             convergence_history=[c for c in convergence_history if c is not None],
             best_positions_history=best_positions_history,
             total_time_seconds=total_time,
@@ -365,7 +365,7 @@ class PSOOptimizer:
         result = self.evaluator.evaluate(nt, feed, pressure)
 
         tac = result.get('TAC', float('inf'))
-        T_reb = result.get('T_reb', 0)
+        T_reb = result.get('T_reb') or 0  # Handle None from failed simulations
         converged = result.get('converged', False)
 
         # Penalty for constraint violations
@@ -476,9 +476,14 @@ def main():
     parser.add_argument("--n-particles", type=int, default=20, help="Number of particles")
     parser.add_argument("--n-iterations", type=int, default=50, help="Number of iterations")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--output", default="results", help="Output directory")
+    parser.add_argument("--output", default="results", help="Base output directory")
 
     args = parser.parse_args()
+
+    # Create run-specific output directory
+    from config import create_run_output_dir
+    run_output_dir = create_run_output_dir(f"{args.case}_PSO", args.output)
+    logger.info(f"Output directory: {run_output_dir}")
 
     # Load configuration
     try:
@@ -561,12 +566,12 @@ def main():
         optimizer.result = result
 
         # Save results
-        filename = optimizer.save_results(args.output)
+        filename = optimizer.save_results(run_output_dir)
 
         # Generate convergence plots
         try:
             from visualization_metaheuristic import MetaheuristicVisualizer
-            visualizer = MetaheuristicVisualizer(args.output)
+            visualizer = MetaheuristicVisualizer(run_output_dir)
 
             # Convergence plot
             conv_plot = visualizer.plot_convergence(

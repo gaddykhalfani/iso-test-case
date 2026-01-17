@@ -228,6 +228,34 @@ def get_column_config(column_name: str) -> Optional[ColumnConfig]:
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# OUTPUT DIRECTORY HELPER
+# ════════════════════════════════════════════════════════════════════════════
+
+def create_run_output_dir(case_name: str, base_dir: str = "results") -> str:
+    """
+    Create a timestamped output directory for a specific run.
+
+    Parameters
+    ----------
+    case_name : str
+        Case identifier (e.g., 'Case1_COL2')
+    base_dir : str
+        Base results directory (default: 'results')
+
+    Returns
+    -------
+    str : Path to the created directory (e.g., 'results/Case1_COL2_20260118_120000/')
+    """
+    from datetime import datetime
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(base_dir, f"{case_name}_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    return run_dir
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # DEFAULT CONFIGURATIONS
 # ════════════════════════════════════════════════════════════════════════════
 
