@@ -37,11 +37,13 @@ RESULTS_DIR.mkdir(exist_ok=True)
 
 # Try to import repo modules for case listing
 try:
-    from config import list_available_cases, get_case_config
+    from config import list_available_cases, get_case_config, get_column_template, COLUMN_TEMPLATES
     from iso_optimizer import T_REBOILER_MAX
 except Exception as e:
     list_available_cases = lambda: []
     get_case_config = lambda name: None
+    get_column_template = lambda name: None
+    COLUMN_TEMPLATES = {}
     T_REBOILER_MAX = 120.0
     print(f"Warning: could not import full repo modules: {e}")
 
@@ -69,6 +71,11 @@ if "last_progress" not in st.session_state:
     st.session_state.last_progress = {}
 if "convergence_history" not in st.session_state:
     st.session_state.convergence_history = []
+# Config editing session state - per-session, NOT global
+if "config_overrides" not in st.session_state:
+    st.session_state.config_overrides = {}
+if "selected_case_for_config" not in st.session_state:
+    st.session_state.selected_case_for_config = None
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -172,6 +179,69 @@ def get_convergence_data(job_id: str):
         return None
 
 
+def get_column_defaults(case_name: str) -> dict:
+    """
+    Get default column configuration values for a case.
+    Returns a dict with bounds and initial values.
+    """
+    if not case_name or '_' not in case_name:
+        return {}
+
+    column_name = case_name.split('_')[1]
+    template = get_column_template(column_name)
+    if not template:
+        return {}
+
+    return {
+        'nt_bounds': template.get('nt_bounds', (15, 80)),
+        'feed_bounds': template.get('feed_bounds', (10, 70)),
+        'pressure_bounds': template.get('pressure_bounds', (0.1, 1.0)),
+        'initial_nt': template.get('initial_nt', 25),
+        'initial_feed': template.get('initial_feed', 15),
+        'initial_pressure': template.get('initial_pressure', 0.2),
+        'description': template.get('description', ''),
+    }
+
+
+def build_config_overrides_from_ui(defaults: dict, ui_values: dict) -> dict:
+    """
+    Build config overrides dict from UI values, only including changed values.
+    Returns empty dict if nothing changed from defaults.
+    """
+    overrides = {}
+
+    # Check bounds
+    if ui_values.get('nt_min') is not None and ui_values.get('nt_max') is not None:
+        new_nt_bounds = (int(ui_values['nt_min']), int(ui_values['nt_max']))
+        if new_nt_bounds != defaults.get('nt_bounds'):
+            overrides['nt_bounds'] = new_nt_bounds
+
+    if ui_values.get('feed_min') is not None and ui_values.get('feed_max') is not None:
+        new_feed_bounds = (int(ui_values['feed_min']), int(ui_values['feed_max']))
+        if new_feed_bounds != defaults.get('feed_bounds'):
+            overrides['feed_bounds'] = new_feed_bounds
+
+    if ui_values.get('pressure_min') is not None and ui_values.get('pressure_max') is not None:
+        new_pressure_bounds = (float(ui_values['pressure_min']), float(ui_values['pressure_max']))
+        if new_pressure_bounds != defaults.get('pressure_bounds'):
+            overrides['pressure_bounds'] = new_pressure_bounds
+
+    # Check initial values
+    if ui_values.get('initial_nt') is not None:
+        if int(ui_values['initial_nt']) != defaults.get('initial_nt'):
+            overrides['initial_nt'] = int(ui_values['initial_nt'])
+
+    if ui_values.get('initial_feed') is not None:
+        if int(ui_values['initial_feed']) != defaults.get('initial_feed'):
+            overrides['initial_feed'] = int(ui_values['initial_feed'])
+
+    if ui_values.get('initial_pressure') is not None:
+        if float(ui_values['initial_pressure']) != defaults.get('initial_pressure'):
+            overrides['initial_pressure'] = float(ui_values['initial_pressure'])
+
+    return overrides
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ════════════════════════════════════════════════════════════════════════════
@@ -219,6 +289,150 @@ demo_mode = st.sidebar.checkbox(
     help="Run with mock evaluator for testing"
 )
 
+# ════════════════════════════════════════════════════════════════════════════
+# COLUMN CONFIGURATION EDITOR (Per-Run, Multi-Run Safe)
+# ════════════════════════════════════════════════════════════════════════════
+st.sidebar.markdown("---")
+st.sidebar.subheader("Column Configuration")
+
+# Get default values for selected case
+defaults = get_column_defaults(case)
+
+# Reset overrides if case changed
+if st.session_state.selected_case_for_config != case:
+    st.session_state.selected_case_for_config = case
+    st.session_state.config_overrides = {}
+
+if defaults:
+    st.sidebar.caption(f"Column: {defaults.get('description', case.split('_')[1])}")
+
+    with st.sidebar.expander("Edit Bounds & Initial Values", expanded=False):
+        st.caption("Changes apply to this run only (multi-run safe)")
+
+        # NT (Number of Trays) bounds
+        st.markdown("**Number of Trays (NT)**")
+        col1, col2 = st.columns(2)
+        with col1:
+            nt_min = st.number_input(
+                "Min NT",
+                min_value=1,
+                max_value=200,
+                value=int(defaults['nt_bounds'][0]),
+                step=1,
+                key="nt_min_input"
+            )
+        with col2:
+            nt_max = st.number_input(
+                "Max NT",
+                min_value=1,
+                max_value=200,
+                value=int(defaults['nt_bounds'][1]),
+                step=1,
+                key="nt_max_input"
+            )
+        initial_nt = st.number_input(
+            "Initial NT",
+            min_value=int(nt_min),
+            max_value=int(nt_max),
+            value=min(max(int(defaults['initial_nt']), int(nt_min)), int(nt_max)),
+            step=1,
+            key="initial_nt_input"
+        )
+
+        st.markdown("---")
+
+        # Feed Stage bounds
+        st.markdown("**Feed Stage**")
+        col1, col2 = st.columns(2)
+        with col1:
+            feed_min = st.number_input(
+                "Min Feed",
+                min_value=1,
+                max_value=200,
+                value=int(defaults['feed_bounds'][0]),
+                step=1,
+                key="feed_min_input"
+            )
+        with col2:
+            feed_max = st.number_input(
+                "Max Feed",
+                min_value=1,
+                max_value=200,
+                value=int(defaults['feed_bounds'][1]),
+                step=1,
+                key="feed_max_input"
+            )
+        initial_feed = st.number_input(
+            "Initial Feed",
+            min_value=int(feed_min),
+            max_value=int(feed_max),
+            value=min(max(int(defaults['initial_feed']), int(feed_min)), int(feed_max)),
+            step=1,
+            key="initial_feed_input"
+        )
+
+        st.markdown("---")
+
+        # Pressure bounds
+        st.markdown("**Pressure (bar)**")
+        col1, col2 = st.columns(2)
+        with col1:
+            pressure_min = st.number_input(
+                "Min P",
+                min_value=0.001,
+                max_value=10.0,
+                value=float(defaults['pressure_bounds'][0]),
+                step=0.01,
+                format="%.3f",
+                key="pressure_min_input"
+            )
+        with col2:
+            pressure_max = st.number_input(
+                "Max P",
+                min_value=0.001,
+                max_value=10.0,
+                value=float(defaults['pressure_bounds'][1]),
+                step=0.01,
+                format="%.3f",
+                key="pressure_max_input"
+            )
+        initial_pressure = st.number_input(
+            "Initial Pressure",
+            min_value=float(pressure_min),
+            max_value=float(pressure_max),
+            value=min(max(float(defaults['initial_pressure']), float(pressure_min)), float(pressure_max)),
+            step=0.01,
+            format="%.3f",
+            key="initial_pressure_input"
+        )
+
+        # Build overrides from UI values
+        ui_values = {
+            'nt_min': nt_min,
+            'nt_max': nt_max,
+            'feed_min': feed_min,
+            'feed_max': feed_max,
+            'pressure_min': pressure_min,
+            'pressure_max': pressure_max,
+            'initial_nt': initial_nt,
+            'initial_feed': initial_feed,
+            'initial_pressure': initial_pressure,
+        }
+        config_overrides = build_config_overrides_from_ui(defaults, ui_values)
+
+        # Show what's changed
+        if config_overrides:
+            st.markdown("---")
+            st.markdown("**Modified values:**")
+            for key, value in config_overrides.items():
+                st.caption(f"• {key}: {value}")
+        else:
+            st.caption("Using default values")
+
+else:
+    config_overrides = {}
+    st.sidebar.caption("Select a case to configure")
+
 # Algorithm-specific options
 st.sidebar.markdown("---")
 st.sidebar.subheader("Algorithm Options")
@@ -249,7 +463,11 @@ if mode == "Run Optimization":
     col1, col2, col3 = st.columns([2, 1, 1])
 
     with col1:
-        st.markdown(f"**Case:** `{case}` | **Algorithm:** `{algorithm}` | **Demo:** `{demo_mode}`")
+        config_status = "custom" if config_overrides else "default"
+        st.markdown(f"**Case:** `{case}` | **Algorithm:** `{algorithm}` | **Demo:** `{demo_mode}` | **Config:** `{config_status}`")
+        if config_overrides:
+            with st.expander("View Config Overrides", expanded=False):
+                st.json(config_overrides)
 
     with col2:
         start_btn = st.button(
@@ -274,6 +492,11 @@ if mode == "Run Optimization":
             kwargs["n_particles"] = n_particles
             kwargs["n_iterations"] = n_iterations
             kwargs["seed"] = seed
+
+        # Include config overrides for multi-run safety
+        # These are scoped to THIS run only, not global
+        if config_overrides:
+            kwargs["config_overrides"] = config_overrides
 
         result = start_optimization(case, algorithm, demo_mode, **kwargs)
         if result:

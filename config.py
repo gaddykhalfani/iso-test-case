@@ -228,6 +228,172 @@ def get_column_config(column_name: str) -> Optional[ColumnConfig]:
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# RUN-SPECIFIC CONFIGURATION
+# ════════════════════════════════════════════════════════════════════════════
+
+def create_run_config(case_name: str, overrides: Optional[Dict] = None) -> Optional[Dict]:
+    """
+    Create a run-specific configuration by combining base config with overrides.
+
+    This function creates an ISOLATED copy of the configuration that is safe
+    for concurrent multi-run scenarios. The original COLUMN_TEMPLATES remain
+    unmodified.
+
+    Parameters
+    ----------
+    case_name : str
+        Case identifier (e.g., 'Case1_COL2')
+    overrides : dict, optional
+        Override values for bounds and initial values. Expected structure:
+        {
+            'nt_bounds': (min, max),
+            'feed_bounds': (min, max),
+            'pressure_bounds': (min, max),
+            'initial_nt': int,
+            'initial_feed': int,
+            'initial_pressure': float,
+        }
+
+    Returns
+    -------
+    dict : Run-specific configuration (deep copy with overrides applied)
+           Returns None if case_name is invalid
+    """
+    import copy
+
+    # Get base config (this already creates a new dict)
+    base_config = get_case_config(case_name)
+    if base_config is None:
+        return None
+
+    # Deep copy to ensure complete isolation
+    run_config = copy.deepcopy(base_config)
+
+    # Apply overrides if provided
+    if overrides:
+        # Bounds overrides
+        if 'nt_bounds' in overrides:
+            run_config['bounds']['nt_bounds'] = tuple(overrides['nt_bounds'])
+            run_config['iso']['nt_bounds'] = tuple(overrides['nt_bounds'])
+        if 'feed_bounds' in overrides:
+            run_config['bounds']['feed_bounds'] = tuple(overrides['feed_bounds'])
+            run_config['iso']['feed_bounds'] = tuple(overrides['feed_bounds'])
+        if 'pressure_bounds' in overrides:
+            run_config['bounds']['pressure_bounds'] = tuple(overrides['pressure_bounds'])
+            run_config['iso']['pressure_bounds'] = tuple(overrides['pressure_bounds'])
+
+        # Initial values overrides
+        if 'initial_nt' in overrides:
+            run_config['initial']['nt'] = overrides['initial_nt']
+        if 'initial_feed' in overrides:
+            run_config['initial']['feed'] = overrides['initial_feed']
+        if 'initial_pressure' in overrides:
+            run_config['initial']['pressure'] = overrides['initial_pressure']
+
+    return run_config
+
+
+def save_run_config(run_config: Dict, run_id: str, base_dir: str = "results") -> str:
+    """
+    Save a run-specific configuration to a JSON file.
+
+    Parameters
+    ----------
+    run_config : dict
+        The run-specific configuration to save
+    run_id : str
+        Unique identifier for this run (e.g., job_id)
+    base_dir : str
+        Base directory for results (default: 'results')
+
+    Returns
+    -------
+    str : Path to the saved config file
+    """
+    import json
+
+    os.makedirs(base_dir, exist_ok=True)
+    config_path = os.path.join(base_dir, f"run_config_{run_id}.json")
+
+    # Convert tuples to lists for JSON serialization
+    def serialize_config(obj):
+        if isinstance(obj, dict):
+            return {k: serialize_config(v) for k, v in obj.items()}
+        elif isinstance(obj, tuple):
+            return list(obj)
+        return obj
+
+    serializable_config = serialize_config(run_config)
+
+    with open(config_path, 'w', encoding='utf-8') as f:
+        json.dump(serializable_config, f, indent=2)
+
+    return config_path
+
+
+def load_run_config(config_path: str) -> Optional[Dict]:
+    """
+    Load a run-specific configuration from a JSON file.
+
+    Parameters
+    ----------
+    config_path : str
+        Path to the config JSON file
+
+    Returns
+    -------
+    dict : Loaded configuration with tuples restored, or None if failed
+    """
+    import json
+
+    if not os.path.exists(config_path):
+        print(f"Config file not found: {config_path}")
+        return None
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+
+        # Convert lists back to tuples for bounds
+        def restore_tuples(obj, tuple_keys={'nt_bounds', 'feed_bounds', 'pressure_bounds'}):
+            if isinstance(obj, dict):
+                return {
+                    k: tuple(v) if k in tuple_keys and isinstance(v, list)
+                    else restore_tuples(v, tuple_keys)
+                    for k, v in obj.items()
+                }
+            return obj
+
+        return restore_tuples(config)
+    except Exception as e:
+        print(f"Error loading config: {e}")
+        return None
+
+
+def get_column_template(column_name: str) -> Optional[Dict]:
+    """
+    Get a copy of the column template (for dashboard display).
+
+    Returns a COPY to prevent accidental modification of global templates.
+
+    Parameters
+    ----------
+    column_name : str
+        Column identifier (e.g., 'COL2')
+
+    Returns
+    -------
+    dict : Copy of column template or None if not found
+    """
+    import copy
+
+    if column_name not in COLUMN_TEMPLATES:
+        return None
+
+    return copy.deepcopy(COLUMN_TEMPLATES[column_name])
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # OUTPUT DIRECTORY HELPER
 # ════════════════════════════════════════════════════════════════════════════
 

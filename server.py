@@ -52,6 +52,8 @@ class RunRequest(BaseModel):
     n_particles: Optional[int] = None
     n_iterations: Optional[int] = None
     seed: Optional[int] = None
+    # Per-run config overrides (multi-run safe)
+    config_overrides: Optional[Dict] = None
 
 
 class JobStatus(BaseModel):
@@ -182,10 +184,21 @@ async def start_run(payload: Dict):
         "no_sweep": false,
         "n_particles": 20,   # PSO/GA only
         "n_iterations": 50,  # PSO/GA only
-        "seed": 42           # PSO/GA only
+        "seed": 42,          # PSO/GA only
+        "config_overrides": {  # Per-run config (multi-run safe)
+          "nt_bounds": [15, 100],
+          "feed_bounds": [5, 80],
+          "pressure_bounds": [0.1, 1.5],
+          "initial_nt": 30,
+          "initial_feed": 20,
+          "initial_pressure": 0.3
+        }
       }
 
     If demo=True, runs demo_runner.py which simulates output (no Aspen required).
+
+    Config overrides are saved to a run-specific JSON file to ensure
+    multi-run safety (concurrent runs don't interfere with each other).
     """
     import time as time_module
 
@@ -208,6 +221,9 @@ async def start_run(payload: Dict):
     n_iterations = payload.get("n_iterations")
     seed = payload.get("seed")
 
+    # Per-run config overrides (multi-run safe)
+    config_overrides = payload.get("config_overrides")
+
     job_id = str(uuid.uuid4())
     q = asyncio.Queue()
     jobs[job_id] = {
@@ -221,7 +237,26 @@ async def start_run(payload: Dict):
         "start_time": time_module.time(),
         "convergence_history": [],  # Live convergence data for charts
         "last_progress": {},  # Most recent progress update
+        "config_overrides": config_overrides,  # Track what config was used
     }
+
+    # Create run-specific config file if overrides provided
+    config_file_path = None
+    if config_overrides and not demo:
+        try:
+            # Import config module functions
+            from config import create_run_config, save_run_config
+
+            # Create run-specific config (isolated copy with overrides)
+            run_config = create_run_config(case, config_overrides)
+            if run_config:
+                # Save to a run-specific JSON file
+                config_file_path = save_run_config(run_config, job_id, RESULTS_DIR)
+                print(f"[SERVER] Created run-specific config: {config_file_path}", flush=True)
+                jobs[job_id]["config_file"] = config_file_path
+        except Exception as e:
+            print(f"[SERVER] Warning: Failed to create run config: {e}", flush=True)
+            # Continue without config file - optimizer will use defaults
 
     if demo:
         # Run the demo runner which prints simulated progress and writes a demo JSON
@@ -230,6 +265,10 @@ async def start_run(payload: Dict):
         # Run the appropriate optimizer as a subprocess
         script = ALGORITHM_SCRIPTS[algorithm]
         cmd = [sys.executable, os.path.join(REPO_ROOT, script), case]
+
+        # Add config file argument if we have run-specific config
+        if config_file_path:
+            cmd.extend(["--config-file", config_file_path])
 
         # Add algorithm-specific options
         if algorithm == "ISO":

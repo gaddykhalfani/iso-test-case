@@ -477,6 +477,12 @@ def main():
     parser.add_argument("--n-iterations", type=int, default=50, help="Number of iterations")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--output", default="results", help="Base output directory")
+    parser.add_argument(
+        "--config-file",
+        type=str,
+        default=None,
+        help="Path to run-specific config JSON file (for multi-run safety)"
+    )
 
     args = parser.parse_args()
 
@@ -485,12 +491,36 @@ def main():
     run_output_dir = create_run_output_dir(f"{args.case}_PSO", args.output)
     logger.info(f"Output directory: {run_output_dir}")
 
-    # Load configuration
-    try:
-        from config import get_case_config
-        config = get_case_config(args.case)
-        if not config:
-            # Use default config
+    # Load configuration - use config file if provided (multi-run safe)
+    config = None
+    if args.config_file:
+        try:
+            from config import load_run_config
+            config = load_run_config(args.config_file)
+            if config:
+                logger.info(f"Using run-specific config from: {args.config_file}")
+            else:
+                logger.warning(f"Failed to load config file: {args.config_file}")
+        except ImportError:
+            logger.warning("Could not import load_run_config, falling back to get_case_config")
+
+    # Fall back to get_case_config if no config file or loading failed
+    if config is None:
+        try:
+            from config import get_case_config
+            config = get_case_config(args.case)
+            if not config:
+                # Use default config
+                config = {
+                    'bounds': {
+                        'nt_bounds': (20, 70),
+                        'feed_bounds': (10, 60),
+                        'pressure_bounds': (0.1, 0.5),
+                    },
+                    'min_section_stages': 3,
+                    'T_reb_max': T_REBOILER_MAX,
+                }
+        except ImportError:
             config = {
                 'bounds': {
                     'nt_bounds': (20, 70),
@@ -500,16 +530,6 @@ def main():
                 'min_section_stages': 3,
                 'T_reb_max': T_REBOILER_MAX,
             }
-    except ImportError:
-        config = {
-            'bounds': {
-                'nt_bounds': (20, 70),
-                'feed_bounds': (10, 60),
-                'pressure_bounds': (0.1, 0.5),
-            },
-            'min_section_stages': 3,
-            'T_reb_max': T_REBOILER_MAX,
-        }
 
     # Create evaluator
     if args.demo:

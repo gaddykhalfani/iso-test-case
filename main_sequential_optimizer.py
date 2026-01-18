@@ -76,7 +76,7 @@ log_file, run_timestamp = setup_logging()
 logger = logging.getLogger(__name__)
 
 # Import modules
-from config import get_case_config, list_available_cases, create_run_output_dir
+from config import get_case_config, list_available_cases, create_run_output_dir, load_run_config
 from aspen_interface import AspenEnergyOptimizer
 from tac_calculator import TACCalculator
 from tac_evaluator import TACEvaluator
@@ -291,16 +291,17 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
                          sweep_nt_step: int = 2,
                          sweep_feed_step: int = 2,
                          nt_range_around_opt: int = 20,
-                         feed_range_around_opt: int = 10):
+                         feed_range_around_opt: int = 10,
+                         run_config: dict = None):
     """
     Run TRUE Iterative Sequential Optimization with Multiple U-Curves.
-    
+
     Parameters
     ----------
     case_name : str
         Case identifier (e.g., 'Case1_COL2')
     config_overrides : dict, optional
-        Override default configuration values
+        Override default configuration values (legacy, prefer run_config)
     run_post_sweep : bool
         Whether to run post-ISO NT-Feed sweep for U-curves (default: True)
     sweep_nt_step : int
@@ -311,18 +312,25 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
         Sweep NT within ± this many stages of optimal (default: 20)
     feed_range_around_opt : int
         Sweep Feed within ± this many stages of optimal (default: 10)
-        
+    run_config : dict, optional
+        Pre-loaded run-specific configuration (for multi-run safety).
+        If provided, this takes precedence over get_case_config().
+
     Returns
     -------
     dict : Optimization results
     """
-    # Get configuration
-    config = get_case_config(case_name)
-    if config is None:
-        logger.error(f"Unknown case: {case_name}")
-        return None
+    # Get configuration - use run_config if provided (multi-run safe)
+    if run_config is not None:
+        config = run_config
+        logger.info("Using pre-loaded run-specific configuration")
+    else:
+        config = get_case_config(case_name)
+        if config is None:
+            logger.error(f"Unknown case: {case_name}")
+            return None
 
-    # Apply overrides
+    # Apply overrides (legacy support)
     if config_overrides:
         for key, value in config_overrides.items():
             if key in config['bounds']:
@@ -738,6 +746,31 @@ def interactive_menu():
 # MAIN ENTRY POINT
 # ════════════════════════════════════════════════════════════════════════════
 
+def parse_args():
+    """Parse command line arguments."""
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Iterative Sequential Optimization (ISO) for Distillation Columns"
+    )
+    parser.add_argument(
+        "case",
+        nargs="?",
+        help="Case identifier (e.g., Case1_COL2)"
+    )
+    parser.add_argument(
+        "--no-sweep",
+        action="store_true",
+        help="Skip post-ISO NT-Feed sweep"
+    )
+    parser.add_argument(
+        "--config-file",
+        type=str,
+        default=None,
+        help="Path to run-specific config JSON file (for multi-run safety)"
+    )
+    return parser.parse_args()
+
+
 def main():
     """Main entry point."""
     # Debug: Print immediately to confirm script started
@@ -747,13 +780,33 @@ def main():
     print(f"Working directory: {os.getcwd()}", flush=True)
     print("=" * 60, flush=True)
 
-    if len(sys.argv) > 1:
-        case_name = sys.argv[1]
+    args = parse_args()
+
+    if args.case:
+        case_name = args.case
         print(f"Case name: {case_name}", flush=True)
-        # Check for --no-sweep flag
-        run_sweep = '--no-sweep' not in sys.argv
+
+        # Load run-specific config if provided (multi-run safe)
+        run_config = None
+        if args.config_file:
+            print(f"Loading run-specific config: {args.config_file}", flush=True)
+            run_config = load_run_config(args.config_file)
+            if run_config:
+                print(f"Config loaded successfully for case: {run_config.get('case_name')}", flush=True)
+                logger.info(f"Using run-specific config from: {args.config_file}")
+            else:
+                print(f"Warning: Failed to load config file, using defaults", flush=True)
+                logger.warning(f"Failed to load config file: {args.config_file}")
+
+        run_sweep = not args.no_sweep
         print_header()
-        result = run_iso_optimization(case_name, run_post_sweep=run_sweep)
+
+        # Pass run_config directly if loaded, otherwise use case_name to get default
+        result = run_iso_optimization(
+            case_name,
+            run_post_sweep=run_sweep,
+            run_config=run_config  # Pass pre-loaded config if available
+        )
 
         # Exit with proper code
         if result is None:
