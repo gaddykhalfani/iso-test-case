@@ -171,6 +171,10 @@ def _reader_thread(proc: subprocess.Popen, job_id: str, loop: asyncio.AbstractEv
         jobs[job_id]["status"] = "failed"
         _enqueue(loop, q, f"*** READER THREAD ERROR: {e}")
 
+# Maximum concurrent runs constant (used in /run endpoint)
+MAX_CONCURRENT_RUNS_LIMIT = 4
+
+
 @app.post("/run")
 async def start_run(payload: Dict):
     """
@@ -199,8 +203,18 @@ async def start_run(payload: Dict):
 
     Config overrides are saved to a run-specific JSON file to ensure
     multi-run safety (concurrent runs don't interfere with each other).
+
+    Maximum concurrent runs: 4 (to prevent resource exhaustion)
     """
     import time as time_module
+
+    # Check concurrent run limit
+    active_count = len([j for j in jobs.values() if j["status"] == "running"])
+    if active_count >= MAX_CONCURRENT_RUNS_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Maximum concurrent runs ({MAX_CONCURRENT_RUNS_LIMIT}) reached. Please wait for a run to complete."
+        )
 
     case = payload.get("case")
     if not case:
@@ -526,12 +540,47 @@ async def get_plot(filename: str):
 # HEALTH CHECK
 # ════════════════════════════════════════════════════════════════════════════
 
+# Maximum concurrent runs allowed
+MAX_CONCURRENT_RUNS = 4
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
+    active_jobs = [j for j in jobs.values() if j["status"] == "running"]
     return {
         "status": "healthy",
-        "active_jobs": len([j for j in jobs.values() if j["status"] == "running"]),
+        "active_jobs": len(active_jobs),
+        "max_concurrent": MAX_CONCURRENT_RUNS,
         "total_jobs": len(jobs),
         "results_count": len(glob.glob(os.path.join(RESULTS_DIR, "*.json"))),
+    }
+
+
+@app.get("/active-runs")
+async def get_active_runs():
+    """Get list of currently active/running jobs."""
+    import time as time_module
+
+    active = []
+    for jid, job in jobs.items():
+        if job["status"] == "running":
+            elapsed = None
+            if job.get("start_time"):
+                elapsed = round(time_module.time() - job["start_time"], 1)
+
+            active.append({
+                "job_id": jid,
+                "case": job.get("case"),
+                "algorithm": job.get("algorithm", "ISO"),
+                "status": job["status"],
+                "elapsed_seconds": elapsed,
+                "last_progress": job.get("last_progress", {}),
+                "config_overrides": job.get("config_overrides"),
+            })
+
+    return {
+        "active_runs": active,
+        "count": len(active),
+        "max_concurrent": MAX_CONCURRENT_RUNS,
     }
