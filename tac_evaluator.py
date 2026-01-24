@@ -111,57 +111,91 @@ class TACEvaluator:
         """Extract condenser and reboiler temperatures from Aspen."""
         try:
             base_path = r"\Data\Blocks\{}\Output".format(self.block_name)
-            
+
+            # 1. Get actual number of stages first (source of truth)
+            actual_nt = nt
+            try:
+                nstage_path = base_path + r"\NSTAGE"
+                node = self.aspen.aspen.Tree.FindNode(nstage_path)
+                if node and node.Value:
+                    actual_nt = int(node.Value)
+                    if actual_nt != nt:
+                        logger.warning(f"  [Temp] NSTAGE mismatch: requested NT={nt}, Aspen output NSTAGE={actual_nt}")
+            except:
+                logger.warning(f"  [Temp] Could not read NSTAGE from output, using NT={nt}")
+
+            # 2. Get Condenser Temperature (Stage 1)
             T_cond = None
-            try:
-                path_cond = base_path + r"\STAGE_TEMP\1"
-                node = self.aspen.aspen.Tree.FindNode(path_cond)
-                if node and node.Value:
-                    T_cond = node.Value
-            except:
-                pass
-            
-            if T_cond is None:
+            cond_path_used = None
+            cond_paths = [
+                base_path + r"\STAGE_TEMP\1",
+                base_path + r"\B_TEMP\1",
+                base_path + r"\COND_TEMP",
+            ]
+            for path in cond_paths:
                 try:
-                    path_cond = base_path + r"\B_TEMP\1"
-                    node = self.aspen.aspen.Tree.FindNode(path_cond)
-                    if node and node.Value:
+                    node = self.aspen.aspen.Tree.FindNode(path)
+                    if node and node.Value is not None:
                         T_cond = node.Value
+                        cond_path_used = path
+                        break
                 except:
                     pass
-            
+
+            # 3. Get Reboiler Temperature (Stage = actual_nt)
             T_reb = None
-            try:
-                path_reb = base_path + r"\STAGE_TEMP\{}".format(nt)
-                node = self.aspen.aspen.Tree.FindNode(path_reb)
-                if node and node.Value:
-                    T_reb = node.Value
-            except:
-                pass
-            
-            if T_reb is None:
+            reb_path_used = None
+            reb_paths = [
+                base_path + r"\STAGE_TEMP\{}".format(actual_nt),
+                base_path + r"\B_TEMP\{}".format(actual_nt),
+                base_path + r"\REB_TEMP",
+                base_path + r"\BOTTOM_TEMP",
+            ]
+            for path in reb_paths:
                 try:
-                    path_reb = base_path + r"\B_TEMP\{}".format(nt)
-                    node = self.aspen.aspen.Tree.FindNode(path_reb)
-                    if node and node.Value:
+                    node = self.aspen.aspen.Tree.FindNode(path)
+                    if node and node.Value is not None:
                         T_reb = node.Value
+                        reb_path_used = path
+                        break
                 except:
                     pass
-            
+
+            # 4. Validation & Sanity Checks
             if T_cond is not None and T_reb is not None:
-                logger.debug(f"  Temps: T_cond={T_cond:.1f}°C, T_reb={T_reb:.1f}°C")
+                # Basic physics check: Reboiler must be hotter than condenser
+                if T_reb < T_cond:
+                    logger.warning(f"  [Temp] INVALID: T_reb ({T_reb:.1f}C) < T_cond ({T_cond:.1f}C) - Physical impossibility!")
+                    logger.warning(f"  [Temp]   T_cond path: {cond_path_used}")
+                    logger.warning(f"  [Temp]   T_reb path: {reb_path_used}")
+                    logger.warning(f"  [Temp]   NSTAGE={actual_nt} (requested NT={nt})")
+                    return None, None
+
+                # Check for "default" or "stale" 0.0 values often returned by failed runs
+                if T_reb < 0.1 or T_cond < 0.1:
+                    logger.warning(f"  [Temp] INVALID: Zero temperatures detected: T_cond={T_cond}, T_reb={T_reb}")
+                    return None, None
+
+                logger.info(f"  [Temp] T_cond={T_cond:.1f}C, T_reb={T_reb:.1f}C (NSTAGE={actual_nt})")
                 return T_cond, T_reb
             else:
+                logger.warning(f"  [Temp] Extraction FAILED: T_cond={T_cond}, T_reb={T_reb} (NSTAGE={actual_nt})")
+                if T_cond is None:
+                    logger.warning(f"  [Temp]   Could not find condenser temp in any path")
+                if T_reb is None:
+                    logger.warning(f"  [Temp]   Could not find reboiler temp in any path")
                 return None, None
-                
+
         except Exception as e:
-            logger.warning("  Error extracting temperatures: {}".format(e))
+            logger.warning("  [Temp] Exception extracting temperatures: {}".format(e))
             return None, None
     
-    def evaluate(self, nt, feed, pressure):
+    def evaluate(self, nt, feed, pressure, run_diagnostic_on_fail=False,
+                 rr_sweep_on_fail=False, rr_sweep_range=(0.5, 4.0), rr_sweep_points=10,
+                 purity_spec=None):
         """
         Evaluate TAC for given configuration.
-        
+
         Parameters:
         -----------
         nt : int
@@ -170,10 +204,30 @@ class TACEvaluator:
             Feed stage location
         pressure : float
             Column pressure (bar)
-            
+        run_diagnostic_on_fail : bool
+            If True, run diagnostic when simulation fails to determine
+            if the failure is due to unachievable purity spec (default: False)
+        rr_sweep_on_fail : bool
+            If True, run full RR sweep when simulation fails to generate
+            RR vs Purity curve showing achievability (default: False)
+            Note: This is slower (10+ simulations per failed point)
+        rr_sweep_range : tuple
+            (min_rr, max_rr) range for RR sweep (default: 0.5 to 4.0)
+        rr_sweep_points : int
+            Number of points in RR sweep (default: 10)
+        purity_spec : dict, optional
+            Purity specification from config.PURITY_SPECS containing:
+            - 'stream': Product stream name (e.g., 'TOLL', 'EBB')
+            - 'component': Key component (e.g., 'STYRE-01', 'TOLUE-01')
+            - 'fraction_type': 'MASSFRAC' or 'MOLEFRAC'
+            - 'target': Target purity value
+
         Returns:
         --------
         dict : Result dictionary with TAC and all cost components
+               If run_diagnostic_on_fail=True and simulation fails, includes
+               'diagnostic' key with diagnostic results.
+               If rr_sweep_on_fail=True, includes 'rr_sweep' key with sweep data.
         """
         self.eval_count += 1
         
@@ -216,7 +270,54 @@ class TACEvaluator:
         if not converged:
             logger.warning("  NOT CONVERGED: {}".format(error_msg))
             self.failed_count += 1
+
+            # Run diagnostic if enabled to determine WHY it failed
+            diagnostic_result = None
+            if run_diagnostic_on_fail:
+                try:
+                    diagnostic_result = self.aspen.run_diagnostic(
+                        self.block_name, nt, feed, pressure, self.feed_stream,
+                        purity_spec=purity_spec
+                    )
+                    if diagnostic_result and diagnostic_result.get('converged_without_spec'):
+                        logger.info("  +-- DIAGNOSTIC RESULT ----------------------")
+                        if diagnostic_result.get('achieved_purity') is not None:
+                            logger.info("  | Purity achievable: {:.4f}".format(
+                                diagnostic_result['achieved_purity']))
+                        if diagnostic_result.get('target_purity') is not None:
+                            logger.info("  | Target purity: {:.4f}".format(
+                                diagnostic_result['target_purity']))
+                        if diagnostic_result.get('natural_rr') is not None:
+                            logger.info("  | Natural RR: {:.2f}".format(
+                                diagnostic_result['natural_rr']))
+                        if (diagnostic_result.get('achieved_purity') is not None and
+                            diagnostic_result.get('target_purity') is not None):
+                            if diagnostic_result['achieved_purity'] < diagnostic_result['target_purity']:
+                                logger.info("  | >>> SPEC UNACHIEVABLE at this config")
+                            else:
+                                logger.info("  | >>> Spec achievable (solver difficulty)")
+                        logger.info("  +-------------------------------------------")
+                except Exception as diag_error:
+                    logger.warning("  Diagnostic failed: {}".format(diag_error))
+
+            # Run RR sweep if enabled (generates full RR vs Purity curve)
+            rr_sweep_result = None
+            if rr_sweep_on_fail:
+                try:
+                    logger.info("  Running RR sweep diagnostic...")
+                    rr_sweep_result = self.aspen.sweep_rr_purity(
+                        self.block_name, nt, feed, pressure, self.feed_stream,
+                        rr_range=rr_sweep_range, num_points=rr_sweep_points,
+                        purity_spec=purity_spec
+                    )
+                except Exception as sweep_error:
+                    logger.warning("  RR sweep failed: {}".format(sweep_error))
+
             result = self._failed_result(reason=error_msg)
+            if diagnostic_result:
+                result['diagnostic'] = diagnostic_result
+            if rr_sweep_result:
+                result['rr_sweep'] = rr_sweep_result
             self.cache[key] = result
             return result
         

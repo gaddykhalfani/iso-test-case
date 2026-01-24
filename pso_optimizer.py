@@ -138,10 +138,11 @@ class PSOOptimizer:
         PSO algorithm parameters
     """
 
-    def __init__(self, evaluator, config: dict, pso_config: Optional[PSOConfig] = None):
+    def __init__(self, evaluator, config: dict, pso_config: Optional[PSOConfig] = None, purity_spec=None):
         self.evaluator = evaluator
         self.config = config
         self.pso_config = pso_config or PSOConfig()
+        self.purity_spec = purity_spec
 
         # Extract bounds
         self.nt_bounds = config['bounds']['nt_bounds']
@@ -362,11 +363,17 @@ class PSOOptimizer:
         """
         self.eval_count += 1
 
-        result = self.evaluator.evaluate(nt, feed, pressure)
+        # Evaluate (with diagnostic on failure)
+        result = self.evaluator.evaluate(nt, feed, pressure, run_diagnostic_on_fail=True, rr_sweep_on_fail=True, purity_spec=self.purity_spec)
 
         tac = result.get('TAC', float('inf'))
-        T_reb = result.get('T_reb') or 0  # Handle None from failed simulations
+        T_reb = result.get('T_reb')
         converged = result.get('converged', False)
+
+        # If T_reb is None, cannot verify constraint -> treat as infeasible
+        if T_reb is None:
+            T_reb = self.T_reb_max + 50  # Force constraint violation
+            logger.debug(f"  T_reb extraction failed - treating as infeasible")
 
         # Penalty for constraint violations
         penalty = 0

@@ -76,7 +76,7 @@ log_file, run_timestamp = setup_logging()
 logger = logging.getLogger(__name__)
 
 # Import modules
-from config import get_case_config, list_available_cases, create_run_output_dir, load_run_config
+from config import get_case_config, list_available_cases, create_run_output_dir, load_run_config, get_purity_spec
 from aspen_interface import AspenEnergyOptimizer
 from tac_calculator import TACCalculator
 from tac_evaluator import TACEvaluator
@@ -99,13 +99,14 @@ class SweepPoint:
     T_reb: float = 0.0
 
 
-def run_nt_feed_sweep(evaluator, optimal_pressure: float, 
+def run_nt_feed_sweep(evaluator, optimal_pressure: float,
                       nt_bounds: tuple, feed_bounds: tuple,
                       optimal_nt: int = None, optimal_feed: int = None,
                       nt_step: int = 2, feed_step: int = 2,
                       min_section_stages: int = 3,
                       nt_range_around_opt: int = 20,
-                      feed_range_around_opt: int = 10) -> List[Dict]:
+                      feed_range_around_opt: int = 10,
+                      purity_spec: dict = None) -> List[Dict]:
     """
     Run NT-Feed parametric sweep AROUND the optimal point.
     
@@ -226,14 +227,17 @@ def run_nt_feed_sweep(evaluator, optimal_pressure: float,
                            f"({100*eval_count/total_points:.0f}%) - "
                            f"ETA: {remaining/60:.1f} min")
             
-            # Evaluate this point
+            # Evaluate this point (with diagnostic on failure)
             try:
                 result = evaluator.evaluate(
-                    nt=nt, 
-                    feed=feed, 
-                    pressure=optimal_pressure
+                    nt=nt,
+                    feed=feed,
+                    pressure=optimal_pressure,
+                    run_diagnostic_on_fail=True,
+                    rr_sweep_on_fail=True,
+                    purity_spec=purity_spec
                 )
-                
+
                 # evaluator.evaluate() returns a dict, not a tuple
                 tac = result.get('TAC', 1e12)
                 converged = result.get('converged', False)
@@ -338,6 +342,13 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
             else:
                 config[key] = value
 
+    # Get purity spec for diagnostic features
+    purity_spec = get_purity_spec(case_name)
+    if purity_spec:
+        logger.info(f"Purity spec: {purity_spec.get('stream')}/{purity_spec.get('component')}")
+    else:
+        logger.warning(f"No purity spec found for {case_name}, diagnostics will use defaults")
+
     # Create run-specific output directory
     run_output_dir = create_run_output_dir(case_name)
     logger.info(f"Output directory: {run_output_dir}")
@@ -424,7 +435,7 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
         'max_iterations': 10,
     }
     
-    optimizer = ISOOptimizer(evaluator, iso_config)
+    optimizer = ISOOptimizer(evaluator, iso_config, purity_spec=purity_spec)
     
     # ─────────────────────────────────────────────────────────────────────────
     # PHASE 1: RUN ISO OPTIMIZATION
@@ -458,7 +469,8 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
                 feed_step=sweep_feed_step,
                 min_section_stages=3,
                 nt_range_around_opt=nt_range_around_opt,
-                feed_range_around_opt=feed_range_around_opt
+                feed_range_around_opt=feed_range_around_opt,
+                purity_spec=purity_spec
             )
         
         # ─────────────────────────────────────────────────────────────────────

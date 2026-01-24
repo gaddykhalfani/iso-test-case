@@ -189,19 +189,22 @@ class ISOOptimizer:
     4. Infeasibility labeling
     """
     
-    def __init__(self, evaluator, config):
+    def __init__(self, evaluator, config, purity_spec=None):
         """
         Initialize ISO optimizer.
-        
+
         Parameters
         ----------
         evaluator : TACEvaluator
             The TAC evaluator instance connected to Aspen
         config : dict
             Configuration dictionary with bounds and settings
+        purity_spec : dict, optional
+            Purity specification from config.PURITY_SPECS for diagnostic features
         """
         self.evaluator = evaluator
         self.config = config
+        self.purity_spec = purity_spec
         
         # Extract bounds
         self.nt_bounds = config['bounds']['nt_bounds']
@@ -281,7 +284,9 @@ class ISOOptimizer:
         for iteration in range(1, self.max_iterations + 1):
             logger.info("")
             logger.info("=" * 70)
+            logger.info("=" * 70)
             logger.info(f"ISO ITERATION {iteration}")
+            logger.info(f"START Condition: P={current_pressure:.4f}, NT={current_nt}, NF={current_feed}")
             logger.info("=" * 70)
 
             # Emit progress for dashboard
@@ -318,9 +323,14 @@ class ISOOptimizer:
             
             if pressure_sweep.optimal_tac < float('inf'):
                 current_pressure = pressure_sweep.optimal_value
-                logger.info(f"  -> P* = {current_pressure:.4f} bar")
+                logger.info(f"  -> P* = {current_pressure:.4f} bar, TAC=${pressure_sweep.optimal_tac:,.0f}")
+                # Log feasible/infeasible counts from this sweep
+                feasible_pts = sum(1 for p in pressure_sweep.points if p.feasibility == FeasibilityStatus.FEASIBLE)
+                infeasible_pts = len(pressure_sweep.points) - feasible_pts
+                logger.info(f"     ({feasible_pts} feasible, {infeasible_pts} infeasible out of {len(pressure_sweep.points)} points)")
             else:
-                logger.warning("  No feasible pressure found!")
+                logger.warning("  No feasible pressure found! Keeping previous pressure.")
+                logger.warning(f"  All {len(pressure_sweep.points)} points were infeasible")
             
             # ────────────────────────────────────────────────────────────────
             # STEP 2: OPTIMIZE NT
@@ -370,7 +380,11 @@ class ISOOptimizer:
                 logger.info(f"  -> NF* = {current_feed}")
             else:
                 logger.warning("  No feasible feed found!")
-            
+
+            # Log iteration state summary
+            logger.info("")
+            logger.info(f"  [STATE] After iteration {iteration}: P={current_pressure:.4f} bar, NT={current_nt}, NF={current_feed}, TAC=${current_tac:,.0f}")
+
             # ────────────────────────────────────────────────────────────────
             # STORE ITERATION RESULT
             # ────────────────────────────────────────────────────────────────
@@ -658,16 +672,24 @@ class ISOOptimizer:
         if key in self.cache:
             return self.cache[key]
         
-        # Evaluate using existing evaluator
+        # Evaluate using existing evaluator (with diagnostic on failure)
         self.eval_count += 1
-        result = self.evaluator.evaluate(nt, feed, pressure)
+        result = self.evaluator.evaluate(nt, feed, pressure, run_diagnostic_on_fail=True, rr_sweep_on_fail=True, purity_spec=self.purity_spec)
         
-        # Extract values
+        # Extract values (with None safety)
         tac = result.get('TAC', float('inf'))
         converged = result.get('converged', False)
-        T_reb = result.get('T_reb', 0)
-        T_cond = result.get('T_cond', 0)
+        T_reb = result.get('T_reb')
+        T_cond = result.get('T_cond')
         
+        # Handle None temperatures - treat as infeasible (cannot verify constraint)
+        T_reb_missing = (T_reb is None)
+        T_cond_missing = (T_cond is None)
+        if T_reb is None:
+            T_reb = 0.0
+        if T_cond is None:
+            T_cond = 0.0
+
         # Create evaluation point
         point = EvaluationPoint(
             nt=nt,
@@ -679,37 +701,47 @@ class ISOOptimizer:
             q_reb=result.get('Q_reb', 0),
             q_cond=result.get('Q_cond', 0),
             diameter=result.get('diameter', 0),
-            T_reb=T_reb if T_reb else 0,
-            T_cond=T_cond if T_cond else 0,
+            T_reb=T_reb,
+            T_cond=T_cond,
             converged=converged,
         )
-        
+
         # ════════════════════════════════════════════════════════════════════
         # FEASIBILITY CHECKS (Professor's requirements)
         # ════════════════════════════════════════════════════════════════════
-        
+
         if not converged:
             point.feasibility = FeasibilityStatus.INFEASIBLE_CONVERGENCE
             point.infeasibility_reason = "Simulation did not converge"
             self.infeasible_count += 1
-        
+
+        elif T_reb_missing:
+            # CRITICAL: If T_reb cannot be extracted, treat as infeasible
+            # (cannot verify temperature constraint => conservative rejection)
+            point.feasibility = FeasibilityStatus.INFEASIBLE_TEMPERATURE
+            point.infeasibility_reason = "T_reb extraction failed (cannot verify constraint)"
+            point.tac = float('inf')
+            self.infeasible_count += 1
+            logger.warning(f"  [X] INFEASIBLE: T_reb could not be extracted for NT={nt}, P={pressure:.4f}")
+
         elif T_reb > self.T_reb_max:
             # CRITICAL: Temperature constraint
             point.feasibility = FeasibilityStatus.INFEASIBLE_TEMPERATURE
             point.infeasibility_reason = f"T_reb={T_reb:.1f}C > {self.T_reb_max}C (polymerization risk)"
             point.tac = float('inf')  # Exclude from optimization
             self.infeasible_count += 1
-            
-            logger.debug(f"  [X] INFEASIBLE: {point.infeasibility_reason}")
-        
+
+            logger.info(f"  [X] INFEASIBLE: {point.infeasibility_reason}")
+
         elif tac >= 1e10:
             point.feasibility = FeasibilityStatus.INFEASIBLE_CONVERGENCE
             point.infeasibility_reason = "Invalid TAC result"
             self.infeasible_count += 1
-        
+
         else:
             point.feasibility = FeasibilityStatus.FEASIBLE
             self.feasible_count += 1
+            logger.info(f"  [OK] FEASIBLE: TAC=${tac:,.0f}, T_reb={T_reb:.1f}C (P={pressure:.4f})")
         
         # Cache and store
         self.cache[key] = point

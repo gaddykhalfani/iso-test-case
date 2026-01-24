@@ -82,6 +82,120 @@ COLUMN_TEMPLATES = {
 }
 
 # ════════════════════════════════════════════════════════════════════════════
+# PURITY SPECIFICATIONS - Stream/Component mapping for each Case+Column
+# ════════════════════════════════════════════════════════════════════════════
+
+PURITY_SPECS = {
+    # Case 1 - Direct Sequence
+    'Case1_COL2': {
+        'stream': 'TOLL',
+        'component': 'TOLUE-01',
+        'fraction_type': 'MASSFRAC',
+        'target': 0.99,
+    },
+    'Case1_COL3': {
+        'stream': 'EB',
+        'component': 'ETHYL-01',
+        'fraction_type': 'MASSFRAC',
+        'target': 0.99,
+    },
+    'Case1_COL4': {
+        'stream': 'STY',
+        'component': 'STYRE-01',
+        'fraction_type': 'MASSFRAC',
+        'target': 0.999,
+    },
+    'Case1_COL5': {
+        'stream': 'AMS',
+        'component': 'ALPHA-01',
+        'fraction_type': 'MASSFRAC',
+        'target': 0.999,
+    },
+
+    # Case 8 - Indirect Sequence (EB before STY)
+    'Case8_COL2': {
+        'stream': 'EBTOL',  # Top product (middle split - no purity spec)
+        'component': None,   # Middle split has no single key component
+        'fraction_type': 'MASSFRAC',
+        'target': None,      # No purity target for middle split
+        'is_middle_split': True,
+        'bottom_stream': 'STYAMS',
+        'top_components': ['TOLUE-01', 'ETHYL-01', 'STYRE-01'],  # Lights go UP
+        'bottom_components': ['ALPHA-01', 'STY-DI', 'STY-TRI', 'DPP'],  # Heavies go DOWN
+    },
+    'Case8_COL3': {
+        'stream': 'LIQPROD2',
+        'component': 'TOLUE-01',
+        'fraction_type': 'MASSFRAC',
+        'target': 0.99,
+    },
+    'Case8_COL4': {
+        'stream': 'EBB',
+        'component': 'STYRE-01',
+        'fraction_type': 'MASSFRAC',
+        'target': 0.997,
+        # Alternative spec for EB recovery:
+        'alt_stream': 'TOLL',
+        'alt_component': 'ETHYL-01',
+        'alt_target': 0.99,
+    },
+    'Case8_COL5': {
+        'stream': 'AMSS',
+        'component': 'ALPHA-01',
+        'fraction_type': 'MASSFRAC',
+        'target': 0.999,
+    },
+
+    # Case 9 - Similar to Case 8
+    'Case9_COL2': {
+        'stream': 'EBTOL',
+        'component': None,
+        'fraction_type': 'MASSFRAC',
+        'target': None,
+        'is_middle_split': True,
+        'bottom_stream': 'STYAMS',
+        'top_components': ['TOLUE-01', 'ETHYL-01', 'STYRE-01'],  # Lights go UP
+        'bottom_components': ['ALPHA-01', 'STY-DI', 'STY-TRI', 'DPP'],  # Heavies go DOWN
+    },
+    'Case9_COL3': {
+        'stream': 'LIQPROD2',
+        'component': 'TOLUE-01',
+        'fraction_type': 'MASSFRAC',
+        'target': 0.99,
+    },
+    'Case9_COL4': {
+        'stream': 'EBB',
+        'component': 'STYRE-01',
+        'fraction_type': 'MASSFRAC',
+        'target': 0.997,
+    },
+    'Case9_COL5': {
+        'stream': 'AMSS',
+        'component': 'ALPHA-01',
+        'fraction_type': 'MASSFRAC',
+        'target': 0.999,
+    },
+}
+
+
+def get_purity_spec(case_name: str) -> Optional[Dict]:
+    """
+    Get purity specification for a case.
+
+    Parameters
+    ----------
+    case_name : str
+        Case identifier (e.g., 'Case1_COL2', 'Case8_COL4')
+
+    Returns
+    -------
+    dict : Purity spec with keys: stream, component, fraction_type, target
+           Returns None if case not found
+    """
+    return PURITY_SPECS.get(case_name)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # DATACLASSES
 # ════════════════════════════════════════════════════════════════════════════
 

@@ -146,10 +146,11 @@ if PYMOO_AVAILABLE:
         Constraint: T_reb <= 120C
         """
 
-        def __init__(self, evaluator, config: dict, optimizer_ref=None):
+        def __init__(self, evaluator, config: dict, optimizer_ref=None, purity_spec=None):
             self.evaluator = evaluator
             self.config = config
             self.optimizer_ref = optimizer_ref
+            self.purity_spec = purity_spec
             self.T_reb_max = config.get('T_reb_max', T_REBOILER_MAX)
             self.min_section_stages = config.get('min_section_stages', 3)
 
@@ -179,12 +180,17 @@ if PYMOO_AVAILABLE:
                 # Enforce valid feed
                 feed = max(self.min_section_stages + 1, min(feed, nt - self.min_section_stages))
 
-                # Evaluate
-                result = self.evaluator.evaluate(nt, feed, pressure)
+                # Evaluate (with diagnostic on failure)
+                result = self.evaluator.evaluate(nt, feed, pressure, run_diagnostic_on_fail=True, rr_sweep_on_fail=True, purity_spec=self.purity_spec)
 
                 tac = result.get('TAC', 1e12)
-                T_reb = result.get('T_reb') or 0  # Handle None from failed simulations
+                T_reb = result.get('T_reb')
                 converged = result.get('converged', False)
+
+                # If T_reb is None, cannot verify constraint -> treat as infeasible
+                if T_reb is None:
+                    T_reb = self.T_reb_max + 50  # Force constraint violation
+                    logger.debug(f"  T_reb extraction failed for NT={nt}, P={pressure:.4f} - treating as infeasible")
 
                 # Track statistics
                 if self.optimizer_ref:
@@ -274,13 +280,14 @@ class GAOptimizer:
         GA algorithm parameters
     """
 
-    def __init__(self, evaluator, config: dict, ga_config: Optional[GAConfig] = None):
+    def __init__(self, evaluator, config: dict, ga_config: Optional[GAConfig] = None, purity_spec=None):
         if not PYMOO_AVAILABLE:
             raise ImportError("pymoo is required for GA optimizer. Install with: pip install pymoo")
 
         self.evaluator = evaluator
         self.config = config
         self.ga_config = ga_config or GAConfig()
+        self.purity_spec = purity_spec
 
         # Temperature constraint
         self.T_reb_max = config.get('T_reb_max', T_REBOILER_MAX)
@@ -324,7 +331,7 @@ class GAOptimizer:
         _emit_progress(0, "initialization", message="Initializing GA population")
 
         # Create problem
-        problem = DistillationProblem(self.evaluator, self.config, optimizer_ref=self)
+        problem = DistillationProblem(self.evaluator, self.config, optimizer_ref=self, purity_spec=self.purity_spec)
 
         # Create algorithm
         algorithm = GA(
@@ -362,8 +369,8 @@ class GAOptimizer:
 
             optimal_tac = res.F[0] if res.F is not None else float('inf')
 
-            # Get final evaluation for complete info
-            final_result = self.evaluator.evaluate(optimal_nt, optimal_feed, optimal_pressure)
+            # Get final evaluation for complete info (with diagnostic on failure)
+            final_result = self.evaluator.evaluate(optimal_nt, optimal_feed, optimal_pressure, run_diagnostic_on_fail=True, rr_sweep_on_fail=True, purity_spec=self.purity_spec)
             optimal_T_reb = final_result.get('T_reb', 0)
             optimal_tpc = final_result.get('TPC', 0)
             optimal_toc = final_result.get('TOC', 0)
@@ -503,10 +510,11 @@ class SimpleGAOptimizer:
     Used as fallback when pymoo is not available.
     """
 
-    def __init__(self, evaluator, config: dict, ga_config: Optional[GAConfig] = None):
+    def __init__(self, evaluator, config: dict, ga_config: Optional[GAConfig] = None, purity_spec=None):
         self.evaluator = evaluator
         self.config = config
         self.ga_config = ga_config or GAConfig()
+        self.purity_spec = purity_spec
         self.T_reb_max = config.get('T_reb_max', T_REBOILER_MAX)
 
         self.eval_count = 0
@@ -553,12 +561,16 @@ class SimpleGAOptimizer:
             fitness = []
             for ind in population:
                 nt, feed, pressure = int(ind[0]), int(ind[1]), ind[2]
-                result = self.evaluator.evaluate(nt, feed, pressure)
+                result = self.evaluator.evaluate(nt, feed, pressure, run_diagnostic_on_fail=True, rr_sweep_on_fail=True, purity_spec=self.purity_spec)
                 self.eval_count += 1
 
                 tac = result.get('TAC', 1e12)
-                T_reb = result.get('T_reb') or 0  # Handle None from failed simulations
+                T_reb = result.get('T_reb')
                 converged = result.get('converged', False)
+
+                # If T_reb is None, cannot verify constraint -> treat as infeasible
+                if T_reb is None:
+                    T_reb = self.T_reb_max + 50  # Force constraint violation
 
                 if converged and T_reb <= self.T_reb_max:
                     self.feasible_count += 1

@@ -118,19 +118,22 @@ class SequentialParametricOptimizer:
     This produces clear U-curves showing the capital-energy trade-off.
     """
     
-    def __init__(self, evaluator, config):
+    def __init__(self, evaluator, config, purity_spec=None):
         """
         Initialize optimizer.
-        
+
         Parameters
         ----------
         evaluator : TACEvaluator
             The TAC evaluator instance connected to Aspen
         config : dict
             Configuration dictionary with bounds and settings
+        purity_spec : dict, optional
+            Purity specification from config.PURITY_SPECS for diagnostic features
         """
         self.evaluator = evaluator
         self.config = config
+        self.purity_spec = purity_spec
         
         # Extract bounds
         self.nt_bounds = config['bounds']['nt_bounds']
@@ -565,10 +568,10 @@ class SequentialParametricOptimizer:
         if key in self.cache:
             return self.cache[key]
         
-        # Evaluate
+        # Evaluate (with diagnostic on failure)
         self.eval_count += 1
-        result = self.evaluator.evaluate(nt, feed, pressure)
-        
+        result = self.evaluator.evaluate(nt, feed, pressure, run_diagnostic_on_fail=True, rr_sweep_on_fail=True, purity_spec=self.purity_spec)
+
         # Cache result
         self.cache[key] = result
         

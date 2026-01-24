@@ -61,6 +61,173 @@ st.set_page_config(
 )
 
 # ════════════════════════════════════════════════════════════════════════════
+# CUSTOM CSS STYLING
+# ════════════════════════════════════════════════════════════════════════════
+
+# Algorithm colors (matching visualization modules)
+ALGO_COLORS = {
+    'ISO': '#1f77b4',  # Blue
+    'PSO': '#ff7f0e',  # Orange
+    'GA': '#2ca02c',   # Green
+}
+
+STATUS_COLORS = {
+    'running': '#00cc66',   # Green
+    'done': '#1f77b4',      # Blue
+    'failed': '#d62728',    # Red
+    'killed': '#ff7f0e',    # Orange
+}
+
+st.markdown("""
+<style>
+    /* Main container styling */
+    .main .block-container {
+        padding-top: 2rem;
+    }
+
+    /* Run slot card styling */
+    div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] {
+        background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
+        border-radius: 12px;
+        padding: 1.2rem;
+        margin-bottom: 1rem;
+        border: 1px solid #e8e8e8;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+
+    /* Sidebar styling */
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
+    }
+
+    section[data-testid="stSidebar"] .stMarkdown {
+        color: #e8e8e8;
+    }
+
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3 {
+        color: #ffffff !important;
+    }
+
+    section[data-testid="stSidebar"] .stCaption {
+        color: #b8b8b8 !important;
+    }
+
+    /* Metric styling */
+    div[data-testid="stMetric"] {
+        background: #f8f9fa;
+        border-radius: 8px;
+        padding: 0.8rem;
+        border-left: 3px solid #1f77b4;
+    }
+
+    div[data-testid="stMetric"] label {
+        color: #666666 !important;
+        font-size: 0.85rem !important;
+    }
+
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        color: #1a1a2e !important;
+        font-weight: 600 !important;
+    }
+
+    /* Button styling */
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #1f77b4 0%, #1565c0 100%);
+        border: none;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+
+    .stButton > button[kind="primary"]:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(31, 119, 180, 0.3);
+    }
+
+    .stButton > button[kind="secondary"] {
+        background: #ffffff;
+        border: 2px solid #d62728;
+        color: #d62728;
+        border-radius: 8px;
+        font-weight: 600;
+    }
+
+    .stButton > button[kind="secondary"]:hover {
+        background: #d62728;
+        color: white;
+    }
+
+    /* Expander styling */
+    div[data-testid="stExpander"] {
+        background: #ffffff;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+
+    div[data-testid="stExpander"] summary {
+        font-weight: 600;
+        color: #1a1a2e;
+    }
+
+    /* Select box styling */
+    div[data-testid="stSelectbox"] > div {
+        border-radius: 8px;
+    }
+
+    /* Progress bar styling */
+    div[data-testid="stProgress"] > div {
+        background: #e8e8e8;
+        border-radius: 10px;
+    }
+
+    div[data-testid="stProgress"] > div > div {
+        background: linear-gradient(90deg, #1f77b4 0%, #2ca02c 100%);
+        border-radius: 10px;
+    }
+
+    /* Info/Success/Error/Warning boxes */
+    div[data-testid="stAlert"] {
+        border-radius: 8px;
+        border-left-width: 4px;
+    }
+
+    /* Divider styling */
+    hr {
+        border: none;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, #e0e0e0, transparent);
+        margin: 1.5rem 0;
+    }
+
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px 8px 0 0;
+        padding: 0.5rem 1rem;
+        font-weight: 500;
+    }
+
+    /* Number input styling */
+    div[data-testid="stNumberInput"] input {
+        border-radius: 6px;
+    }
+
+    /* Chart container */
+    div[data-testid="stArrowVegaLiteChart"] {
+        background: #ffffff;
+        border-radius: 8px;
+        padding: 0.5rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ════════════════════════════════════════════════════════════════════════════
 # SESSION STATE INITIALIZATION - Multi-Run Safe
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -94,6 +261,52 @@ for slot in range(MAX_CONCURRENT_RUNS):
 # Global mode selection
 if "mode" not in st.session_state:
     st.session_state.mode = "Run Optimization"
+
+# ════════════════════════════════════════════════════════════════════════════
+# STYLING HELPER FUNCTIONS
+# ════════════════════════════════════════════════════════════════════════════
+
+def get_algorithm_badge(algorithm: str) -> str:
+    """Generate an HTML badge for the algorithm type."""
+    color = ALGO_COLORS.get(algorithm, '#666666')
+    return f'''<span style="
+        background: {color};
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        margin-left: 0.5rem;
+        display: inline-block;
+    ">{algorithm}</span>'''
+
+
+def get_status_badge(status: str) -> str:
+    """Generate an HTML badge for the job status."""
+    colors = {
+        'running': ('#00cc66', '#e6fff0'),
+        'done': ('#1f77b4', '#e6f3ff'),
+        'failed': ('#d62728', '#ffe6e6'),
+        'killed': ('#ff7f0e', '#fff3e6'),
+    }
+    text_color, bg_color = colors.get(status, ('#666666', '#f0f0f0'))
+    icon = {'running': '●', 'done': '✓', 'failed': '✗', 'killed': '⊘'}.get(status, '○')
+    return f'''<span style="
+        background: {bg_color};
+        color: {text_color};
+        padding: 0.25rem 0.6rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        border: 1px solid {text_color}20;
+    ">{icon} {status.upper()}</span>'''
+
+
+def get_slot_header_style(algorithm: str) -> str:
+    """Get the border color for run slot based on algorithm."""
+    color = ALGO_COLORS.get(algorithm, '#1f77b4')
+    return f"border-left: 4px solid {color}; padding-left: 0.75rem;"
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # HELPER FUNCTIONS
@@ -279,18 +492,24 @@ def render_run_slot(slot_id: int, available_cases: list, api_ok: bool):
     job_status = st.session_state.get(f"{prefix}job_status")
     last_progress = st.session_state.get(f"{prefix}last_progress", {})
 
-    # Status color indicator
-    status_colors = {
-        "running": "🟢",
-        "done": "✅",
-        "failed": "🔴",
-        "killed": "🟠",
-        None: "⚪"
-    }
-    status_icon = status_colors.get(job_status, "⚪")
+    # Get current algorithm for styling
+    current_algo = st.session_state.get(f"{prefix}algorithm", "ISO")
 
     with st.container():
-        st.subheader(f"{status_icon} Run Slot {slot_id + 1}")
+        # Styled header with algorithm color accent
+        header_style = get_slot_header_style(current_algo)
+        algo_badge = get_algorithm_badge(current_algo)
+        status_badge = get_status_badge(job_status) if job_status else ''
+
+        st.markdown(
+            f'''<div style="{header_style}">
+                <h3 style="margin: 0; display: inline-block;">Run Slot {slot_id + 1}</h3>
+                {algo_badge}
+                {status_badge}
+            </div>''',
+            unsafe_allow_html=True
+        )
+        st.markdown("<div style='height: 0.5rem'></div>", unsafe_allow_html=True)
 
         # Row 1: Case, Algorithm, Demo mode selection
         col1, col2, col3 = st.columns([2, 1, 1])
@@ -502,16 +721,15 @@ def render_run_slot(slot_id: int, available_cases: list, api_ok: bool):
                     st.rerun()
 
         with status_col:
-            if job_status:
-                status_text = f"**Status:** {job_status}"
-                if job_status == "running":
-                    st.info(status_text)
-                elif job_status == "done":
-                    st.success(status_text)
-                elif job_status in ("failed", "killed"):
-                    st.error(status_text)
-                else:
-                    st.warning(status_text)
+            # Status shown in header badge, show additional info here if running
+            if job_status == "running":
+                st.caption("Optimization in progress...")
+            elif job_status == "done":
+                st.caption("Completed successfully")
+            elif job_status == "failed":
+                st.caption("Run failed - check logs")
+            elif job_status == "killed":
+                st.caption("Stopped by user")
 
         # Row 4: Live status (if running or has result)
         if job_id:
@@ -569,9 +787,19 @@ def render_run_slot(slot_id: int, available_cases: list, api_ok: bool):
 # SIDEBAR
 # ════════════════════════════════════════════════════════════════════════════
 
-st.sidebar.title("Column Optimization")
-st.sidebar.caption(f"Multi-Run Dashboard (up to {MAX_CONCURRENT_RUNS} concurrent)")
-st.sidebar.markdown("---")
+# Styled sidebar header
+st.sidebar.markdown("""
+<div style="
+    text-align: center;
+    padding: 1rem 0;
+    margin-bottom: 1rem;
+    border-bottom: 2px solid rgba(255,255,255,0.1);
+">
+    <div style="font-size: 2.5rem; margin-bottom: 0.25rem;">&#9879;</div>
+    <h2 style="margin: 0; font-size: 1.3rem; font-weight: 700;">Column Optimizer</h2>
+    <p style="margin: 0.25rem 0 0 0; font-size: 0.8rem; opacity: 0.7;">Multi-Run Dashboard</p>
+</div>
+""", unsafe_allow_html=True)
 
 # Mode selection
 mode = st.sidebar.radio(
@@ -583,22 +811,75 @@ st.session_state.mode = mode
 
 st.sidebar.markdown("---")
 
-# API status indicator
+# API status indicator with enhanced styling
 api_ok = check_api_health()
 if api_ok:
-    st.sidebar.success("API Connected")
     active_count = get_active_runs_count()
-    st.sidebar.caption(f"Active runs: {active_count}/{MAX_CONCURRENT_RUNS}")
+    st.sidebar.markdown(f"""
+    <div style="
+        background: linear-gradient(135deg, #00cc6620 0%, #00cc6610 100%);
+        border: 1px solid #00cc6640;
+        border-radius: 8px;
+        padding: 0.75rem;
+        margin: 0.5rem 0;
+    ">
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+            <span style="color: #00cc66; font-size: 1.2rem;">&#10004;</span>
+            <span style="font-weight: 600; color: #00cc66;">API Connected</span>
+        </div>
+        <div style="font-size: 0.8rem; margin-top: 0.25rem; opacity: 0.8;">
+            Active runs: {active_count}/{MAX_CONCURRENT_RUNS}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 else:
-    st.sidebar.warning("API Not Available")
-    st.sidebar.caption(f"Start server: `uvicorn server:app`")
+    st.sidebar.markdown("""
+    <div style="
+        background: linear-gradient(135deg, #ff7f0e20 0%, #ff7f0e10 100%);
+        border: 1px solid #ff7f0e40;
+        border-radius: 8px;
+        padding: 0.75rem;
+        margin: 0.5rem 0;
+    ">
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+            <span style="color: #ff7f0e; font-size: 1.2rem;">&#9888;</span>
+            <span style="font-weight: 600; color: #ff7f0e;">API Offline</span>
+        </div>
+        <div style="font-size: 0.75rem; margin-top: 0.25rem; opacity: 0.8;">
+            Run: <code>uvicorn server:app</code>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 st.sidebar.markdown("---")
-st.sidebar.caption(f"T_reb limit: {T_REBOILER_MAX}C")
 
-# Quick actions
+# Config info styled
+st.sidebar.markdown(f"""
+<div style="
+    background: rgba(255,255,255,0.05);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8rem;
+">
+    <span style="opacity: 0.6;">T_reb limit:</span>
+    <span style="font-weight: 600;">{T_REBOILER_MAX}&#176;C</span>
+</div>
+""", unsafe_allow_html=True)
+
+# Quick actions with styled header
 st.sidebar.markdown("---")
-st.sidebar.subheader("Quick Actions")
+st.sidebar.markdown("""
+<div style="
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+">
+    &#9881; Quick Actions
+</div>
+""", unsafe_allow_html=True)
 
 if st.sidebar.button("Refresh All Status"):
     st.rerun()
@@ -627,7 +908,24 @@ if st.sidebar.button("Clear Completed"):
 # MAIN CONTENT
 # ════════════════════════════════════════════════════════════════════════════
 
-st.title("Distillation Column Optimization Dashboard")
+# Styled main header
+st.markdown("""
+<div style="
+    background: linear-gradient(135deg, #1f77b4 0%, #1565c0 50%, #0d47a1 100%);
+    color: white;
+    padding: 1.5rem 2rem;
+    border-radius: 12px;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 4px 15px rgba(31, 119, 180, 0.3);
+">
+    <h1 style="margin: 0; font-size: 1.8rem; font-weight: 700;">
+        &#9879; Distillation Column Optimization
+    </h1>
+    <p style="margin: 0.5rem 0 0 0; opacity: 0.9; font-size: 1rem;">
+        Multi-algorithm optimizer with ISO, PSO, and GA support
+    </p>
+</div>
+""", unsafe_allow_html=True)
 
 # Get available cases
 available_cases = list_available_cases()
@@ -635,7 +933,17 @@ if not available_cases:
     available_cases = ["Case1_COL2", "Case1_COL3", "Case8_COL2", "Case9_COL2"]
 
 if mode == "Run Optimization":
-    st.header("Multi-Run Optimization")
+    st.markdown("""
+    <div style="
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 0.5rem;
+    ">
+        <span style="font-size: 1.5rem;">&#9654;</span>
+        <h2 style="margin: 0;">Multi-Run Optimization</h2>
+    </div>
+    """, unsafe_allow_html=True)
     st.caption("Configure and run up to 4 optimizations concurrently. Each run has isolated configuration (multi-run safe).")
 
     # Check for any running jobs and auto-refresh
@@ -663,7 +971,17 @@ if mode == "Run Optimization":
 
 
 elif mode == "Results Browser":
-    st.header("Results Browser")
+    st.markdown("""
+    <div style="
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+    ">
+        <span style="font-size: 1.5rem;">&#128193;</span>
+        <h2 style="margin: 0;">Results Browser</h2>
+    </div>
+    """, unsafe_allow_html=True)
 
     # Fetch results
     results = fetch_results_list()
@@ -736,8 +1054,18 @@ elif mode == "Results Browser":
 
 
 elif mode == "Demo Gallery":
-    st.header("Demo Gallery")
-    st.markdown("Pre-generated results and plots for demonstration.")
+    st.markdown("""
+    <div style="
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 0.5rem;
+    ">
+        <span style="font-size: 1.5rem;">&#127912;</span>
+        <h2 style="margin: 0;">Demo Gallery</h2>
+    </div>
+    """, unsafe_allow_html=True)
+    st.caption("Pre-generated results and plots for demonstration.")
 
     # Show sample images
     st.subheader("Sample U-Curves")
@@ -824,9 +1152,19 @@ elif mode == "Demo Gallery":
 # ════════════════════════════════════════════════════════════════════════════
 
 st.markdown("---")
-st.caption(
-    f"Column Optimization Dashboard | "
-    f"API: {API_BASE_URL} | "
-    f"Results: {RESULTS_DIR} | "
-    f"Max Concurrent: {MAX_CONCURRENT_RUNS}"
-)
+st.markdown(f"""
+<div style="
+    display: flex;
+    justify-content: center;
+    gap: 2rem;
+    padding: 1rem;
+    background: #f8f9fa;
+    border-radius: 8px;
+    font-size: 0.8rem;
+    color: #666;
+">
+    <span><strong>API:</strong> {API_BASE_URL}</span>
+    <span><strong>Results:</strong> {RESULTS_DIR}</span>
+    <span><strong>Max Concurrent:</strong> {MAX_CONCURRENT_RUNS}</span>
+</div>
+""", unsafe_allow_html=True)
