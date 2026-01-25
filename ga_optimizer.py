@@ -801,6 +801,19 @@ def main():
         seed=args.seed,
     )
 
+    # Load purity spec for this case (design target)
+    try:
+        from config import get_purity_spec
+        purity_spec = get_purity_spec(args.case)
+        if purity_spec:
+            logger.info(f"Purity spec loaded: stream={purity_spec.get('stream')}, "
+                       f"component={purity_spec.get('component')}, target={purity_spec.get('target')}")
+        else:
+            logger.warning(f"No purity spec found for {args.case}")
+    except ImportError:
+        purity_spec = None
+        logger.warning("Could not import get_purity_spec from config")
+
     # Track aspen for cleanup
     aspen_instance = None
     if not args.demo:
@@ -809,10 +822,10 @@ def main():
     try:
         # Run optimization
         if PYMOO_AVAILABLE:
-            optimizer = GAOptimizer(evaluator, config, ga_config)
+            optimizer = GAOptimizer(evaluator, config, ga_config, purity_spec=purity_spec)
         else:
             logger.warning("pymoo not available, using simple GA")
-            optimizer = SimpleGAOptimizer(evaluator, config, ga_config)
+            optimizer = SimpleGAOptimizer(evaluator, config, ga_config, purity_spec=purity_spec)
 
         result = optimizer.run(args.case)
 
@@ -864,6 +877,68 @@ def main():
             logger.warning(f"Could not generate plots (matplotlib not available): {e}")
         except Exception as e:
             logger.warning(f"Error generating plots: {e}")
+
+        # Generate Reflux Ratio vs Purity curve at optimal point
+        if not args.demo and purity_spec and aspen_instance:
+            try:
+                logger.info("")
+                logger.info("=" * 70)
+                logger.info("POST-OPTIMIZATION: RR vs PURITY SWEEP")
+                logger.info("=" * 70)
+                logger.info(f"  Optimal config: NT={result.optimal_nt}, NF={result.optimal_feed}, "
+                           f"P={result.optimal_pressure:.4f} bar")
+
+                rr_sweep_data = aspen_instance.sweep_rr_purity(
+                    block_name=config['column']['block_name'],
+                    nt=result.optimal_nt,
+                    feed=result.optimal_feed,
+                    pressure=result.optimal_pressure,
+                    feed_stream=config['column']['feed_stream'],
+                    rr_range=(0.5, 5.0),
+                    num_points=20,
+                    purity_spec=purity_spec
+                )
+
+                if rr_sweep_data:
+                    # Save RR sweep data to JSON
+                    rr_sweep_file = os.path.join(run_output_dir, f"{args.case}_GA_rr_vs_purity.json")
+                    with open(rr_sweep_file, 'w', encoding='utf-8') as f:
+                        json.dump({
+                            'case_name': args.case,
+                            'algorithm': 'GA',
+                            'optimal': {
+                                'nt': result.optimal_nt,
+                                'feed': result.optimal_feed,
+                                'pressure': result.optimal_pressure,
+                                'tac': result.optimal_tac,
+                            },
+                            'purity_spec': purity_spec,
+                            'rr_sweep': rr_sweep_data,
+                        }, f, indent=2)
+                    logger.info(f"RR sweep data saved: {rr_sweep_file}")
+
+                    # Generate plot
+                    from visualization_metaheuristic import MetaheuristicVisualizer
+                    visualizer = MetaheuristicVisualizer(run_output_dir)
+                    rr_plot = visualizer.plot_rr_vs_purity(
+                        rr_sweep_data,
+                        algorithm="GA",
+                        case_name=args.case,
+                        purity_target=purity_spec.get('target'),
+                        optimal_config={
+                            'nt': result.optimal_nt,
+                            'feed': result.optimal_feed,
+                            'pressure': result.optimal_pressure,
+                        }
+                    )
+                    if rr_plot:
+                        logger.info(f"RR vs Purity plot saved: {rr_plot}")
+                        print(f"RR vs Purity plot saved: {rr_plot}")
+
+            except Exception as e:
+                logger.warning(f"RR sweep failed: {e}")
+                import traceback
+                traceback.print_exc()
 
         return result
 

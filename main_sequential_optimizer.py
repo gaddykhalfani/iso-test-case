@@ -472,7 +472,56 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
                 feed_range_around_opt=feed_range_around_opt,
                 purity_spec=purity_spec
             )
-        
+
+        # ─────────────────────────────────────────────────────────────────────
+        # POST-OPTIMIZATION: RR vs PURITY SWEEP
+        # ─────────────────────────────────────────────────────────────────────
+
+        rr_sweep_data = None
+        if result and purity_spec:
+            try:
+                logger.info("")
+                logger.info("=" * 70)
+                logger.info("POST-OPTIMIZATION: RR vs PURITY SWEEP")
+                logger.info("=" * 70)
+                logger.info(f"  Optimal config: NT={result.optimal_nt}, NF={result.optimal_feed}, "
+                           f"P={result.optimal_pressure:.4f} bar")
+
+                rr_sweep_data = aspen.sweep_rr_purity(
+                    block_name=config['column']['block_name'],
+                    nt=result.optimal_nt,
+                    feed=result.optimal_feed,
+                    pressure=result.optimal_pressure,
+                    feed_stream=config['column']['feed_stream'],
+                    rr_range=(0.5, 5.0),
+                    num_points=20,
+                    purity_spec=purity_spec
+                )
+
+                if rr_sweep_data:
+                    # Save RR sweep data to JSON
+                    import json as json_module
+                    rr_sweep_file = os.path.join(run_output_dir, f"{case_name}_ISO_rr_vs_purity.json")
+                    with open(rr_sweep_file, 'w', encoding='utf-8') as f:
+                        json_module.dump({
+                            'case_name': case_name,
+                            'algorithm': 'ISO',
+                            'optimal': {
+                                'nt': result.optimal_nt,
+                                'feed': result.optimal_feed,
+                                'pressure': result.optimal_pressure,
+                                'tac': result.optimal_tac,
+                            },
+                            'purity_spec': purity_spec,
+                            'rr_sweep': rr_sweep_data,
+                        }, f, indent=2)
+                    logger.info(f"RR sweep data saved: {rr_sweep_file}")
+
+            except Exception as e:
+                logger.warning(f"RR sweep failed: {e}")
+                import traceback
+                traceback.print_exc()
+
         # ─────────────────────────────────────────────────────────────────────
         # GENERATE PLOTS
         # ─────────────────────────────────────────────────────────────────────
@@ -494,11 +543,33 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
         
         # Generate all plots including multiple U-curves
         plot_files = visualizer.plot_all(
-            optimizer, 
+            optimizer,
             case_name,
             nt_feed_results=nt_feed_sweep_results,  # Pass sweep data for U-curves
             n_ucurves=7  # Number of U-curves to display
         )
+
+        # Generate RR vs Purity plot if sweep data available
+        if rr_sweep_data:
+            try:
+                from visualization_metaheuristic import MetaheuristicVisualizer
+                meta_visualizer = MetaheuristicVisualizer(run_output_dir)
+                rr_plot = meta_visualizer.plot_rr_vs_purity(
+                    rr_sweep_data,
+                    algorithm="ISO",
+                    case_name=case_name,
+                    purity_target=purity_spec.get('target') if purity_spec else None,
+                    optimal_config={
+                        'nt': result.optimal_nt,
+                        'feed': result.optimal_feed,
+                        'pressure': result.optimal_pressure,
+                    }
+                )
+                if rr_plot:
+                    plot_files.append(rr_plot)
+                    logger.info(f"RR vs Purity plot saved: {rr_plot}")
+            except Exception as e:
+                logger.warning(f"Could not generate RR vs Purity plot: {e}")
         
         # ─────────────────────────────────────────────────────────────────────
         # SAVE RESULTS

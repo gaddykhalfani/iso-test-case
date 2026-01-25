@@ -319,6 +319,144 @@ Time: {stats.get('time_seconds', 0):.1f} seconds
 
         return None
 
+    def plot_rr_vs_purity(self,
+                          rr_sweep_data: List[Dict],
+                          algorithm: str = "PSO",
+                          case_name: str = "Case",
+                          purity_target: float = None,
+                          optimal_config: Dict = None,
+                          save: bool = True) -> str:
+        """
+        Plot Reflux Ratio vs Purity curve from sweep data.
+
+        Parameters
+        ----------
+        rr_sweep_data : List[Dict]
+            List of dicts with keys: 'rr', 'purity', 'converged'
+        algorithm : str
+            Algorithm name (ISO, PSO, GA)
+        case_name : str
+            Case identifier
+        purity_target : float, optional
+            Design purity target (draws horizontal line)
+        optimal_config : Dict, optional
+            Optimal configuration dict with nt, feed, pressure
+        save : bool
+            Whether to save the plot
+
+        Returns
+        -------
+        str : Path to saved plot file
+        """
+        if not rr_sweep_data:
+            logger.warning("No RR sweep data to plot")
+            return None
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        # Separate converged and non-converged points
+        converged_rr = []
+        converged_purity = []
+        failed_rr = []
+
+        for point in rr_sweep_data:
+            rr = point.get('rr')
+            purity = point.get('purity')
+            conv = point.get('converged', False)
+
+            if conv and purity is not None:
+                converged_rr.append(rr)
+                converged_purity.append(purity)
+            else:
+                failed_rr.append(rr)
+
+        # Color based on algorithm
+        algo_colors = {'ISO': '#ff7f0e', 'PSO': '#1f77b4', 'GA': '#2ca02c'}
+        color = algo_colors.get(algorithm, '#1f77b4')
+
+        # Plot converged points with line
+        if converged_rr:
+            # Sort by RR for proper line drawing
+            sorted_pairs = sorted(zip(converged_rr, converged_purity))
+            sorted_rr, sorted_purity = zip(*sorted_pairs)
+
+            ax.plot(sorted_rr, sorted_purity, 'o-', color=color, linewidth=2.5,
+                    markersize=8, label=f'{algorithm} (Converged)', zorder=3)
+
+            # Fill area under curve
+            ax.fill_between(sorted_rr, sorted_purity, alpha=0.15, color=color)
+
+        # Plot failed points as X markers
+        if failed_rr:
+            ax.scatter(failed_rr, [0] * len(failed_rr), marker='x', color='red',
+                      s=80, linewidths=2, label='Non-converged', zorder=4)
+
+        # Draw purity target line
+        if purity_target is not None:
+            ax.axhline(y=purity_target, color='red', linestyle='--', linewidth=2,
+                      alpha=0.8, label=f'Target: {purity_target:.3f}')
+
+            # Find intersection point (minimum RR to achieve target)
+            if converged_rr:
+                for rr, pur in sorted(zip(converged_rr, converged_purity)):
+                    if pur >= purity_target:
+                        ax.axvline(x=rr, color='gray', linestyle=':', linewidth=1.5, alpha=0.7)
+                        ax.scatter([rr], [pur], color='red', s=150, marker='*', zorder=5,
+                                  label=f'Min RR for target: {rr:.2f}')
+                        break
+
+        # Labels and title
+        ax.set_xlabel('Reflux Ratio (RR)', fontsize=13)
+        ax.set_ylabel('Product Purity (mass fraction)', fontsize=13)
+
+        # Build title with optimal config info
+        title = f'Reflux Ratio vs Purity - {case_name} ({algorithm})'
+        if optimal_config:
+            subtitle = (f"NT={optimal_config.get('nt')}, "
+                       f"NF={optimal_config.get('feed')}, "
+                       f"P={optimal_config.get('pressure', 0):.4f} bar")
+            ax.set_title(f'{title}\n{subtitle}', fontsize=13, fontweight='bold')
+        else:
+            ax.set_title(title, fontsize=14, fontweight='bold')
+
+        # Set y-axis limits smartly
+        if converged_purity:
+            min_pur = min(converged_purity)
+            max_pur = max(converged_purity)
+            margin = (max_pur - min_pur) * 0.1 if max_pur > min_pur else 0.02
+            ax.set_ylim(max(0, min_pur - margin), min(1.0, max_pur + margin))
+
+        ax.legend(loc='lower right', fontsize=10, framealpha=0.9)
+        ax.grid(True, alpha=0.3)
+
+        # Add text box with key info
+        if converged_purity:
+            max_purity = max(converged_purity)
+            info_text = f'Max Purity: {max_purity:.4f}'
+            if purity_target:
+                if max_purity >= purity_target:
+                    info_text += f'\nTarget Achievable'
+                else:
+                    info_text += f'\nTarget NOT Achievable'
+            ax.text(0.02, 0.98, info_text, transform=ax.transAxes,
+                   fontsize=10, verticalalignment='top',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                            edgecolor='gray', alpha=0.9))
+
+        plt.tight_layout()
+
+        if save:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = os.path.join(self.output_dir,
+                                   f"{case_name}_{algorithm}_RR_vs_Purity_{timestamp}.png")
+            plt.savefig(filename, dpi=150, bbox_inches='tight')
+            logger.info(f"Saved RR vs Purity plot: {filename}")
+            plt.close()
+            return filename
+
+        plt.close()
+        return None
+
 
 def generate_plots_from_result_file(result_file: str, output_dir: str = "results") -> List[str]:
     """
