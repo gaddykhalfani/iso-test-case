@@ -66,163 +66,356 @@ st.set_page_config(
 
 # Algorithm colors (matching visualization modules)
 ALGO_COLORS = {
-    'ISO': '#1f77b4',  # Blue
-    'PSO': '#ff7f0e',  # Orange
-    'GA': '#2ca02c',   # Green
+    'ISO': '#4fc3f7',  # Electric blue
+    'PSO': '#ffb74d',  # Warm amber
+    'GA': '#66bb6a',   # Emerald green
 }
 
 STATUS_COLORS = {
-    'running': '#00cc66',   # Green
-    'done': '#1f77b4',      # Blue
-    'failed': '#d62728',    # Red
-    'killed': '#ff7f0e',    # Orange
+    'running': '#4cdf8a',   # Bright green
+    'done': '#4fc3f7',      # Electric blue
+    'failed': '#ef5350',    # Bright red
+    'killed': '#ffb74d',    # Warm amber
 }
 
 st.markdown("""
 <style>
-    /* Main container styling */
+    /* ═══════════════════════════════════════════════════════════════
+       KEYFRAME ANIMATIONS
+       ═══════════════════════════════════════════════════════════════ */
+    @keyframes pulse-glow {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.6; transform: scale(1.1); }
+    }
+
+    @keyframes shimmer {
+        0% { background-position: -200% center; }
+        100% { background-position: 200% center; }
+    }
+
+    @keyframes gradient-shift {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       BASE & CONTAINER STYLES
+       ═══════════════════════════════════════════════════════════════ */
     .main .block-container {
-        padding-top: 2rem;
+        padding-top: 1.5rem;
+        max-width: 1400px;
     }
 
-    /* Run slot card styling */
+    .stApp {
+        background-color: #0f1419;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       GLASS-MORPHISM RUN SLOT CARDS
+       ═══════════════════════════════════════════════════════════════ */
     div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] {
-        background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
-        border-radius: 12px;
-        padding: 1.2rem;
-        margin-bottom: 1rem;
-        border: 1px solid #e8e8e8;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        background: linear-gradient(135deg, #1e2030 0%, #1a1c2e 100%);
+        border-radius: 16px;
+        padding: 1.5rem;
+        margin-bottom: 1.2rem;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        box-shadow:
+            0 4px 24px rgba(0, 0, 0, 0.3),
+            inset 0 1px 0 rgba(255, 255, 255, 0.04);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.2s ease;
     }
 
-    /* Sidebar styling */
+    div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]:hover {
+        border-color: rgba(79, 195, 247, 0.15);
+        box-shadow:
+            0 8px 32px rgba(0, 0, 0, 0.4),
+            0 0 20px rgba(79, 195, 247, 0.05),
+            inset 0 1px 0 rgba(255, 255, 255, 0.06);
+        transform: translateY(-1px);
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       SIDEBAR STYLING
+       ═══════════════════════════════════════════════════════════════ */
     section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
+        background: linear-gradient(180deg, #0d1117 0%, #161b22 40%, #0d1117 100%);
+        border-right: 1px solid rgba(79, 195, 247, 0.08);
     }
 
     section[data-testid="stSidebar"] .stMarkdown {
-        color: #e8e8e8;
+        color: #c9d1d9;
     }
 
     section[data-testid="stSidebar"] h1,
     section[data-testid="stSidebar"] h2,
     section[data-testid="stSidebar"] h3 {
-        color: #ffffff !important;
+        color: #e6edf3 !important;
     }
 
     section[data-testid="stSidebar"] .stCaption {
-        color: #b8b8b8 !important;
+        color: #8b949e !important;
     }
 
-    /* Metric styling */
+    section[data-testid="stSidebar"] [role="radiogroup"] label {
+        color: #c9d1d9 !important;
+        transition: color 0.2s ease;
+    }
+
+    section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
+        color: #4fc3f7 !important;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       METRIC CARDS
+       ═══════════════════════════════════════════════════════════════ */
     div[data-testid="stMetric"] {
-        background: #f8f9fa;
-        border-radius: 8px;
-        padding: 0.8rem;
-        border-left: 3px solid #1f77b4;
+        background: linear-gradient(135deg, #1a1f2e 0%, #161a26 100%);
+        border-radius: 12px;
+        padding: 1rem;
+        border-left: 3px solid #4fc3f7;
+        border-top: 1px solid rgba(255, 255, 255, 0.04);
+        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
     }
 
     div[data-testid="stMetric"] label {
-        color: #666666 !important;
-        font-size: 0.85rem !important;
+        color: #8b949e !important;
+        font-size: 0.78rem !important;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        font-weight: 500 !important;
     }
 
     div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-        color: #1a1a2e !important;
-        font-weight: 600 !important;
+        color: #e6edf3 !important;
+        font-weight: 700 !important;
+        font-size: 1.4rem !important;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: -0.02em;
     }
 
-    /* Button styling */
+    /* ═══════════════════════════════════════════════════════════════
+       BUTTON STYLING
+       ═══════════════════════════════════════════════════════════════ */
     .stButton > button[kind="primary"] {
-        background: linear-gradient(135deg, #1f77b4 0%, #1565c0 100%);
+        background: linear-gradient(135deg, #4fc3f7 0%, #29b6f6 50%, #0288d1 100%);
         border: none;
-        border-radius: 8px;
-        font-weight: 600;
-        transition: all 0.3s ease;
+        border-radius: 10px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        font-size: 0.78rem;
+        padding: 0.6rem 1.2rem;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 0 2px 8px rgba(79, 195, 247, 0.25);
     }
 
     .stButton > button[kind="primary"]:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 12px rgba(31, 119, 180, 0.3);
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(79, 195, 247, 0.35);
+        background: linear-gradient(135deg, #81d4fa 0%, #4fc3f7 50%, #29b6f6 100%);
+    }
+
+    .stButton > button[kind="primary"]:active {
+        transform: translateY(0px);
+        box-shadow: 0 2px 6px rgba(79, 195, 247, 0.2);
     }
 
     .stButton > button[kind="secondary"] {
-        background: #ffffff;
-        border: 2px solid #d62728;
-        color: #d62728;
-        border-radius: 8px;
-        font-weight: 600;
+        background: transparent;
+        border: 2px solid #ef5350;
+        color: #ef5350;
+        border-radius: 10px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        font-size: 0.78rem;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     }
 
     .stButton > button[kind="secondary"]:hover {
-        background: #d62728;
-        color: white;
+        background: rgba(239, 83, 80, 0.12);
+        border-color: #ef5350;
+        color: #ff8a80;
+        box-shadow: 0 0 15px rgba(239, 83, 80, 0.2);
     }
 
-    /* Expander styling */
-    div[data-testid="stExpander"] {
-        background: #ffffff;
-        border: 1px solid #e0e0e0;
+    section[data-testid="stSidebar"] .stButton > button {
+        background: rgba(79, 195, 247, 0.08);
+        border: 1px solid rgba(79, 195, 247, 0.2);
+        color: #c9d1d9;
         border-radius: 8px;
+        font-weight: 500;
+        transition: all 0.2s ease;
+        width: 100%;
+    }
+
+    section[data-testid="stSidebar"] .stButton > button:hover {
+        background: rgba(79, 195, 247, 0.15);
+        border-color: rgba(79, 195, 247, 0.4);
+        color: #4fc3f7;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       EXPANDER STYLING
+       ═══════════════════════════════════════════════════════════════ */
+    div[data-testid="stExpander"] {
+        background: rgba(30, 32, 48, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 12px;
         overflow: hidden;
+        backdrop-filter: blur(8px);
     }
 
     div[data-testid="stExpander"] summary {
         font-weight: 600;
-        color: #1a1a2e;
+        color: #c9d1d9;
+        padding: 0.75rem 1rem;
     }
 
-    /* Select box styling */
+    div[data-testid="stExpander"] summary:hover {
+        color: #4fc3f7;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       SELECT BOX & INPUTS
+       ═══════════════════════════════════════════════════════════════ */
     div[data-testid="stSelectbox"] > div {
-        border-radius: 8px;
+        border-radius: 10px;
     }
 
-    /* Progress bar styling */
+    div[data-testid="stNumberInput"] input {
+        border-radius: 8px;
+        background: #161a26;
+        border-color: rgba(255, 255, 255, 0.08);
+        color: #e6edf3;
+    }
+
+    div[data-testid="stNumberInput"] input:focus {
+        border-color: #4fc3f7;
+        box-shadow: 0 0 0 2px rgba(79, 195, 247, 0.15);
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       PROGRESS BAR
+       ═══════════════════════════════════════════════════════════════ */
     div[data-testid="stProgress"] > div {
-        background: #e8e8e8;
-        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.06);
+        border-radius: 12px;
+        overflow: hidden;
     }
 
     div[data-testid="stProgress"] > div > div {
-        background: linear-gradient(90deg, #1f77b4 0%, #2ca02c 100%);
-        border-radius: 10px;
+        background: linear-gradient(90deg, #4fc3f7, #29b6f6, #4fc3f7, #81d4fa);
+        background-size: 200% 100%;
+        border-radius: 12px;
+        animation: shimmer 2.5s ease-in-out infinite;
     }
 
-    /* Info/Success/Error/Warning boxes */
+    /* ═══════════════════════════════════════════════════════════════
+       ALERT BOXES
+       ═══════════════════════════════════════════════════════════════ */
     div[data-testid="stAlert"] {
-        border-radius: 8px;
+        border-radius: 10px;
         border-left-width: 4px;
+        background: rgba(30, 32, 48, 0.6);
     }
 
-    /* Divider styling */
+    /* ═══════════════════════════════════════════════════════════════
+       DIVIDER
+       ═══════════════════════════════════════════════════════════════ */
     hr {
         border: none;
         height: 1px;
-        background: linear-gradient(90deg, transparent, #e0e0e0, transparent);
+        background: linear-gradient(90deg, transparent, rgba(79, 195, 247, 0.15), transparent);
         margin: 1.5rem 0;
     }
 
-    /* Tab styling */
+    /* ═══════════════════════════════════════════════════════════════
+       TABS
+       ═══════════════════════════════════════════════════════════════ */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
+        gap: 4px;
+        background: rgba(30, 32, 48, 0.4);
+        border-radius: 12px;
+        padding: 4px;
     }
 
     .stTabs [data-baseweb="tab"] {
-        border-radius: 8px 8px 0 0;
-        padding: 0.5rem 1rem;
+        border-radius: 10px;
+        padding: 0.5rem 1.2rem;
         font-weight: 500;
+        color: #8b949e;
+        transition: all 0.2s ease;
     }
 
-    /* Number input styling */
-    div[data-testid="stNumberInput"] input {
-        border-radius: 6px;
+    .stTabs [data-baseweb="tab"]:hover {
+        color: #e6edf3;
+        background: rgba(79, 195, 247, 0.08);
     }
 
-    /* Chart container */
+    .stTabs [aria-selected="true"] {
+        background: rgba(79, 195, 247, 0.12) !important;
+        color: #4fc3f7 !important;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       CHART CONTAINER
+       ═══════════════════════════════════════════════════════════════ */
     div[data-testid="stArrowVegaLiteChart"] {
-        background: #ffffff;
-        border-radius: 8px;
-        padding: 0.5rem;
+        background: rgba(22, 26, 38, 0.8);
+        border-radius: 12px;
+        padding: 0.75rem;
+        border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       CAPTION & TEXT
+       ═══════════════════════════════════════════════════════════════ */
+    .stCaption, span[data-testid="stCaptionContainer"] {
+        color: #8b949e !important;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       SCROLLBAR
+       ═══════════════════════════════════════════════════════════════ */
+    ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+        background: #0f1419;
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background: #2d333b;
+        border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        background: #444c56;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       DROPDOWN POPOVER
+       ═══════════════════════════════════════════════════════════════ */
+    [data-baseweb="popover"] {
+        background: #1e2030 !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-radius: 10px !important;
+    }
+
+    [data-baseweb="menu"] {
+        background: #1e2030 !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -268,44 +461,52 @@ if "mode" not in st.session_state:
 
 def get_algorithm_badge(algorithm: str) -> str:
     """Generate an HTML badge for the algorithm type."""
-    color = ALGO_COLORS.get(algorithm, '#666666')
+    color = ALGO_COLORS.get(algorithm, '#8b949e')
     return f'''<span style="
-        background: {color};
-        color: white;
-        padding: 0.25rem 0.75rem;
+        background: {color}18;
+        color: {color};
+        padding: 0.3rem 0.85rem;
         border-radius: 20px;
-        font-size: 0.8rem;
-        font-weight: 600;
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
         margin-left: 0.5rem;
         display: inline-block;
+        border: 1px solid {color}40;
+        text-transform: uppercase;
     ">{algorithm}</span>'''
 
 
 def get_status_badge(status: str) -> str:
     """Generate an HTML badge for the job status."""
     colors = {
-        'running': ('#00cc66', '#e6fff0'),
-        'done': ('#1f77b4', '#e6f3ff'),
-        'failed': ('#d62728', '#ffe6e6'),
-        'killed': ('#ff7f0e', '#fff3e6'),
+        'running': ('#4cdf8a', '#4cdf8a15'),
+        'done': ('#4fc3f7', '#4fc3f715'),
+        'failed': ('#ef5350', '#ef535015'),
+        'killed': ('#ffb74d', '#ffb74d15'),
     }
-    text_color, bg_color = colors.get(status, ('#666666', '#f0f0f0'))
-    icon = {'running': '●', 'done': '✓', 'failed': '✗', 'killed': '⊘'}.get(status, '○')
+    text_color, bg_color = colors.get(status, ('#8b949e', '#8b949e15'))
+    icon = {'running': '&#9679;', 'done': '&#10003;', 'failed': '&#10007;', 'killed': '&#8856;'}.get(status, '&#9675;')
+    animation_style = 'animation: pulse-glow 1.5s ease-in-out infinite;' if status == 'running' else ''
     return f'''<span style="
         background: {bg_color};
         color: {text_color};
-        padding: 0.25rem 0.6rem;
-        border-radius: 6px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        border: 1px solid {text_color}20;
-    ">{icon} {status.upper()}</span>'''
+        padding: 0.3rem 0.7rem;
+        border-radius: 8px;
+        font-size: 0.78rem;
+        font-weight: 700;
+        border: 1px solid {text_color}30;
+        letter-spacing: 0.03em;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+    "><span style="{animation_style} display: inline-block;">{icon}</span> {status.upper()}</span>'''
 
 
 def get_slot_header_style(algorithm: str) -> str:
     """Get the border color for run slot based on algorithm."""
-    color = ALGO_COLORS.get(algorithm, '#1f77b4')
-    return f"border-left: 4px solid {color}; padding-left: 0.75rem;"
+    color = ALGO_COLORS.get(algorithm, '#4fc3f7')
+    return f"border-left: 3px solid {color}; padding-left: 0.75rem;"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -503,13 +704,13 @@ def render_run_slot(slot_id: int, available_cases: list, api_ok: bool):
 
         st.markdown(
             f'''<div style="{header_style}">
-                <h3 style="margin: 0; display: inline-block;">Run Slot {slot_id + 1}</h3>
+                <h3 style="margin: 0; display: inline-block; color: #e6edf3; font-weight: 700; font-size: 1.05rem;">Run Slot {slot_id + 1}</h3>
                 {algo_badge}
                 {status_badge}
             </div>''',
             unsafe_allow_html=True
         )
-        st.markdown("<div style='height: 0.5rem'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height: 0.6rem'></div>", unsafe_allow_html=True)
 
         # Row 1: Case, Algorithm, Demo mode selection
         col1, col2, col3 = st.columns([2, 1, 1])
@@ -791,13 +992,20 @@ def render_run_slot(slot_id: int, available_cases: list, api_ok: bool):
 st.sidebar.markdown("""
 <div style="
     text-align: center;
-    padding: 1rem 0;
+    padding: 1.25rem 0;
     margin-bottom: 1rem;
-    border-bottom: 2px solid rgba(255,255,255,0.1);
+    border-bottom: 1px solid rgba(79, 195, 247, 0.1);
 ">
-    <div style="font-size: 2.5rem; margin-bottom: 0.25rem;">&#9879;</div>
-    <h2 style="margin: 0; font-size: 1.3rem; font-weight: 700;">Column Optimizer</h2>
-    <p style="margin: 0.25rem 0 0 0; font-size: 0.8rem; opacity: 0.7;">Multi-Run Dashboard</p>
+    <div style="
+        font-size: 2.2rem;
+        margin-bottom: 0.3rem;
+        background: linear-gradient(135deg, #4fc3f7, #81d4fa);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    ">&#9879;</div>
+    <h2 style="margin: 0; font-size: 1.2rem; font-weight: 700; color: #e6edf3;">Column Optimizer</h2>
+    <p style="margin: 0.3rem 0 0 0; font-size: 0.75rem; color: #8b949e; letter-spacing: 0.08em; text-transform: uppercase;">Multi-Run Dashboard</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -817,36 +1025,36 @@ if api_ok:
     active_count = get_active_runs_count()
     st.sidebar.markdown(f"""
     <div style="
-        background: linear-gradient(135deg, #00cc6620 0%, #00cc6610 100%);
-        border: 1px solid #00cc6640;
-        border-radius: 8px;
-        padding: 0.75rem;
+        background: rgba(76, 223, 138, 0.06);
+        border: 1px solid rgba(76, 223, 138, 0.2);
+        border-radius: 10px;
+        padding: 0.85rem;
         margin: 0.5rem 0;
     ">
         <div style="display: flex; align-items: center; gap: 0.5rem;">
-            <span style="color: #00cc66; font-size: 1.2rem;">&#10004;</span>
-            <span style="font-weight: 600; color: #00cc66;">API Connected</span>
+            <span style="color: #4cdf8a; font-size: 0.6rem; animation: pulse-glow 2s ease-in-out infinite;">&#9679;</span>
+            <span style="font-weight: 600; color: #4cdf8a; font-size: 0.85rem;">API Connected</span>
         </div>
-        <div style="font-size: 0.8rem; margin-top: 0.25rem; opacity: 0.8;">
-            Active runs: {active_count}/{MAX_CONCURRENT_RUNS}
+        <div style="font-size: 0.75rem; margin-top: 0.35rem; color: #8b949e;">
+            Active runs: <span style="color: #e6edf3; font-weight: 600;">{active_count}/{MAX_CONCURRENT_RUNS}</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
 else:
     st.sidebar.markdown("""
     <div style="
-        background: linear-gradient(135deg, #ff7f0e20 0%, #ff7f0e10 100%);
-        border: 1px solid #ff7f0e40;
-        border-radius: 8px;
-        padding: 0.75rem;
+        background: rgba(255, 183, 77, 0.06);
+        border: 1px solid rgba(255, 183, 77, 0.2);
+        border-radius: 10px;
+        padding: 0.85rem;
         margin: 0.5rem 0;
     ">
         <div style="display: flex; align-items: center; gap: 0.5rem;">
-            <span style="color: #ff7f0e; font-size: 1.2rem;">&#9888;</span>
-            <span style="font-weight: 600; color: #ff7f0e;">API Offline</span>
+            <span style="color: #ffb74d; font-size: 1rem;">&#9888;</span>
+            <span style="font-weight: 600; color: #ffb74d; font-size: 0.85rem;">API Offline</span>
         </div>
-        <div style="font-size: 0.75rem; margin-top: 0.25rem; opacity: 0.8;">
-            Run: <code>uvicorn server:app</code>
+        <div style="font-size: 0.72rem; margin-top: 0.35rem; color: #8b949e;">
+            Run: <code style="background: rgba(255,255,255,0.06); padding: 0.15rem 0.4rem; border-radius: 4px; color: #c9d1d9;">uvicorn server:app</code>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -856,13 +1064,14 @@ st.sidebar.markdown("---")
 # Config info styled
 st.sidebar.markdown(f"""
 <div style="
-    background: rgba(255,255,255,0.05);
-    border-radius: 6px;
-    padding: 0.5rem 0.75rem;
-    font-size: 0.8rem;
+    background: rgba(79, 195, 247, 0.04);
+    border: 1px solid rgba(79, 195, 247, 0.1);
+    border-radius: 8px;
+    padding: 0.6rem 0.85rem;
+    font-size: 0.78rem;
 ">
-    <span style="opacity: 0.6;">T_reb limit:</span>
-    <span style="font-weight: 600;">{T_REBOILER_MAX}&#176;C</span>
+    <span style="color: #8b949e;">T_reb limit:</span>
+    <span style="font-weight: 700; color: #e6edf3; font-variant-numeric: tabular-nums;">{T_REBOILER_MAX}&#176;C</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -870,12 +1079,15 @@ st.sidebar.markdown(f"""
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
 <div style="
-    font-size: 0.9rem;
+    font-size: 0.78rem;
     font-weight: 600;
     margin-bottom: 0.5rem;
     display: flex;
     align-items: center;
     gap: 0.4rem;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
 ">
     &#9881; Quick Actions
 </div>
@@ -911,18 +1123,32 @@ if st.sidebar.button("Clear Completed"):
 # Styled main header
 st.markdown("""
 <div style="
-    background: linear-gradient(135deg, #1f77b4 0%, #1565c0 50%, #0d47a1 100%);
-    color: white;
-    padding: 1.5rem 2rem;
-    border-radius: 12px;
+    background: linear-gradient(135deg, #0d2137 0%, #1a3a5c 30%, #0d3150 60%, #0f1419 100%);
+    background-size: 200% 200%;
+    animation: gradient-shift 8s ease infinite;
+    color: #e6edf3;
+    padding: 2rem 2.5rem;
+    border-radius: 16px;
     margin-bottom: 1.5rem;
-    box-shadow: 0 4px 15px rgba(31, 119, 180, 0.3);
+    border: 1px solid rgba(79, 195, 247, 0.1);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    position: relative;
+    overflow: hidden;
 ">
-    <h1 style="margin: 0; font-size: 1.8rem; font-weight: 700;">
+    <div style="
+        position: absolute;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: radial-gradient(ellipse at 20% 50%, rgba(79, 195, 247, 0.08) 0%, transparent 60%);
+        pointer-events: none;
+    "></div>
+    <h1 style="margin: 0; font-size: 1.7rem; font-weight: 800; position: relative; letter-spacing: -0.02em;">
         &#9879; Distillation Column Optimization
     </h1>
-    <p style="margin: 0.5rem 0 0 0; opacity: 0.9; font-size: 1rem;">
-        Multi-algorithm optimizer with ISO, PSO, and GA support
+    <p style="margin: 0.6rem 0 0 0; color: #8b949e; font-size: 0.95rem; position: relative;">
+        Multi-algorithm optimizer &mdash;
+        <span style="color: #4fc3f7;">ISO</span> &bull;
+        <span style="color: #ffb74d;">PSO</span> &bull;
+        <span style="color: #66bb6a;">GA</span>
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -940,8 +1166,8 @@ if mode == "Run Optimization":
         gap: 0.75rem;
         margin-bottom: 0.5rem;
     ">
-        <span style="font-size: 1.5rem;">&#9654;</span>
-        <h2 style="margin: 0;">Multi-Run Optimization</h2>
+        <span style="font-size: 1.3rem; color: #4fc3f7;">&#9654;</span>
+        <h2 style="margin: 0; color: #e6edf3; font-weight: 700; letter-spacing: -0.01em;">Multi-Run Optimization</h2>
     </div>
     """, unsafe_allow_html=True)
     st.caption("Configure and run up to 4 optimizations concurrently. Each run has isolated configuration (multi-run safe).")
@@ -978,8 +1204,8 @@ elif mode == "Results Browser":
         gap: 0.75rem;
         margin-bottom: 1rem;
     ">
-        <span style="font-size: 1.5rem;">&#128193;</span>
-        <h2 style="margin: 0;">Results Browser</h2>
+        <span style="font-size: 1.3rem; color: #ffb74d;">&#128193;</span>
+        <h2 style="margin: 0; color: #e6edf3; font-weight: 700; letter-spacing: -0.01em;">Results Browser</h2>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1061,8 +1287,8 @@ elif mode == "Demo Gallery":
         gap: 0.75rem;
         margin-bottom: 0.5rem;
     ">
-        <span style="font-size: 1.5rem;">&#127912;</span>
-        <h2 style="margin: 0;">Demo Gallery</h2>
+        <span style="font-size: 1.3rem; color: #66bb6a;">&#127912;</span>
+        <h2 style="margin: 0; color: #e6edf3; font-weight: 700; letter-spacing: -0.01em;">Demo Gallery</h2>
     </div>
     """, unsafe_allow_html=True)
     st.caption("Pre-generated results and plots for demonstration.")
@@ -1156,15 +1382,16 @@ st.markdown(f"""
 <div style="
     display: flex;
     justify-content: center;
-    gap: 2rem;
-    padding: 1rem;
-    background: #f8f9fa;
-    border-radius: 8px;
-    font-size: 0.8rem;
-    color: #666;
+    gap: 2.5rem;
+    padding: 1.2rem;
+    background: rgba(30, 32, 48, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    border-radius: 12px;
+    font-size: 0.75rem;
+    color: #8b949e;
 ">
-    <span><strong>API:</strong> {API_BASE_URL}</span>
-    <span><strong>Results:</strong> {RESULTS_DIR}</span>
-    <span><strong>Max Concurrent:</strong> {MAX_CONCURRENT_RUNS}</span>
+    <span><span style="color: #4fc3f7;">&#9679;</span> <strong style="color: #c9d1d9;">API:</strong> {API_BASE_URL}</span>
+    <span><span style="color: #66bb6a;">&#9679;</span> <strong style="color: #c9d1d9;">Results:</strong> {RESULTS_DIR}</span>
+    <span><span style="color: #ffb74d;">&#9679;</span> <strong style="color: #c9d1d9;">Max Concurrent:</strong> {MAX_CONCURRENT_RUNS}</span>
 </div>
 """, unsafe_allow_html=True)
