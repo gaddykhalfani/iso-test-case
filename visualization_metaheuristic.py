@@ -457,6 +457,215 @@ Time: {stats.get('time_seconds', 0):.1f} seconds
         plt.close()
         return None
 
+    def plot_rr_vs_purity_infeasible(self,
+                                      failed_rr_sweeps: List[Dict],
+                                      algorithm: str = "PSO",
+                                      case_name: str = "Case",
+                                      purity_target: float = None,
+                                      save: bool = True) -> str:
+        """
+        Plot heatmap + summary table for INFEASIBLE designs.
+
+        Shows design parameters (NT, NF, Pressure) and their maximum achieved
+        purity in a two-panel visualization: heatmap on the left, table on right.
+
+        Parameters
+        ----------
+        failed_rr_sweeps : List[Dict]
+            List of failed design data, each containing:
+            - 'nt': Number of stages
+            - 'feed': Feed stage
+            - 'pressure': Operating pressure
+            - 'rr_sweep': List of dicts with 'rr', 'purity', 'converged'
+        algorithm : str
+            Algorithm name (ISO, PSO, GA)
+        case_name : str
+            Case identifier
+        purity_target : float, optional
+            Design purity target
+        save : bool
+            Whether to save the plot
+
+        Returns
+        -------
+        str : Path to saved plot file
+        """
+        if not failed_rr_sweeps:
+            logger.warning("No infeasible RR sweep data to plot")
+            return None
+
+        # Process all designs to extract summary info
+        designs = []
+        for design_data in failed_rr_sweeps:
+            nt = design_data.get('nt')
+            nf = design_data.get('feed')
+            pressure = design_data.get('pressure', 0)
+            rr_sweep = design_data.get('rr_sweep', [])
+
+            if not rr_sweep:
+                continue
+
+            # Find max purity and corresponding RR
+            max_purity = 0
+            best_rr = None
+            for point in rr_sweep:
+                rr = point.get('rr')
+                purity = point.get('purity')
+                conv = point.get('converged', False)
+
+                if conv and purity is not None and purity > max_purity:
+                    max_purity = purity
+                    best_rr = rr
+
+            if max_purity > 0:
+                designs.append({
+                    'nt': nt,
+                    'nf': nf,
+                    'pressure': pressure,
+                    'max_purity': max_purity,
+                    'best_rr': best_rr
+                })
+
+        if not designs:
+            logger.warning("No valid design data to plot")
+            return None
+
+        n_designs = len(designs)
+
+        # Create 2-panel figure
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8),
+                                        gridspec_kw={'width_ratios': [1.2, 1]})
+
+        # LEFT: Heatmap scatter (NT vs NF, color=purity, size=pressure)
+        nts = [d['nt'] for d in designs]
+        nfs = [d['nf'] for d in designs]
+        purities = [d['max_purity'] for d in designs]
+        pressures = [d['pressure'] for d in designs]
+
+        # Scale pressure for marker size
+        p_min, p_max = min(pressures), max(pressures)
+        if p_max > p_min:
+            sizes = [100 + 200 * (p - p_min) / (p_max - p_min) for p in pressures]
+        else:
+            sizes = [150] * len(pressures)
+
+        scatter = ax1.scatter(nts, nfs, c=purities, s=sizes, cmap='RdYlGn',
+                              alpha=0.8, edgecolors='black', linewidths=0.5)
+        cbar = plt.colorbar(scatter, ax=ax1)
+        cbar.set_label('Max Purity Achieved', fontsize=11)
+
+        # Add target line on colorbar if within range
+        if purity_target:
+            cbar_min = min(purities)
+            cbar_max = max(purities)
+            if cbar_min <= purity_target <= cbar_max:
+                cbar.ax.axhline(y=purity_target, color='red', linestyle='--', linewidth=2)
+            cbar.ax.text(1.05, purity_target, f'Target\n{purity_target:.3f}',
+                        transform=cbar.ax.get_yaxis_transform(),
+                        fontsize=8, color='red', va='center')
+
+        ax1.set_xlabel('Number of Trays (NT)', fontsize=12)
+        ax1.set_ylabel('Feed Stage (NF)', fontsize=12)
+        ax1.set_title(f'{algorithm} - Infeasible Designs Heatmap\n(Marker Size = Pressure)',
+                     fontsize=13, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+
+        # Add legend for pressure scale
+        if p_max > p_min:
+            legend_elements = [
+                plt.scatter([], [], s=100, c='gray', alpha=0.6, label=f'P = {p_min:.2f} bar'),
+                plt.scatter([], [], s=200, c='gray', alpha=0.6, label=f'P = {(p_min+p_max)/2:.2f} bar'),
+                plt.scatter([], [], s=300, c='gray', alpha=0.6, label=f'P = {p_max:.2f} bar'),
+            ]
+            ax1.legend(handles=legend_elements, loc='upper right', fontsize=9, framealpha=0.9)
+
+        # RIGHT: Summary table
+        designs_sorted = sorted(designs, key=lambda x: x['max_purity'], reverse=True)
+        top_n = designs_sorted[:8]
+        bottom_n = designs_sorted[-4:] if len(designs_sorted) > 12 else []
+
+        table_data = []
+        for i, d in enumerate(top_n):
+            gap = purity_target - d['max_purity'] if purity_target else 0
+            table_data.append([
+                i + 1,
+                d['nt'],
+                d['nf'],
+                f"{d['pressure']:.2f}",
+                f"{d['max_purity']:.4f}",
+                f"{d['best_rr']:.2f}" if d['best_rr'] else "N/A",
+                f"{gap:.4f}" if purity_target else "-"
+            ])
+
+        if bottom_n:
+            table_data.append(['...', '...', '...', '...', '...', '...', '...'])
+            for d in bottom_n:
+                gap = purity_target - d['max_purity'] if purity_target else 0
+                table_data.append([
+                    '',
+                    d['nt'],
+                    d['nf'],
+                    f"{d['pressure']:.2f}",
+                    f"{d['max_purity']:.4f}",
+                    f"{d['best_rr']:.2f}" if d['best_rr'] else "N/A",
+                    f"{gap:.4f}" if purity_target else "-"
+                ])
+
+        ax2.axis('off')
+        table = ax2.table(
+            cellText=table_data,
+            colLabels=['Rank', 'NT', 'NF', 'P(bar)', 'Max Purity', 'Best RR', 'Gap'],
+            loc='center',
+            cellLoc='center'
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1.2, 1.5)
+
+        # Style table header
+        for j in range(7):
+            table[(0, j)].set_facecolor('#4472C4')
+            table[(0, j)].set_text_props(color='white', fontweight='bold')
+
+        # Color code rows by purity
+        for i, row_data in enumerate(table_data):
+            if row_data[0] == '...':
+                for j in range(7):
+                    table[(i + 1, j)].set_facecolor('#f0f0f0')
+            elif row_data[0] != '':
+                # Top designs - lighter green
+                for j in range(7):
+                    table[(i + 1, j)].set_facecolor('#e6f3e6')
+            else:
+                # Bottom designs - lighter red
+                for j in range(7):
+                    table[(i + 1, j)].set_facecolor('#f9e6e6')
+
+        title_text = f'Summary: Top 8 + Bottom 4 Infeasible Designs'
+        if purity_target:
+            title_text += f'\nTarget Purity: {purity_target:.4f}'
+        ax2.set_title(title_text, fontsize=12, fontweight='bold', pad=20)
+
+        # Add statistics text below table
+        stats_text = f'Total Infeasible: {n_designs} | Best: {max(purities):.4f} | Worst: {min(purities):.4f}'
+        ax2.text(0.5, 0.05, stats_text, transform=ax2.transAxes,
+                fontsize=10, ha='center', style='italic',
+                bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+
+        plt.tight_layout()
+
+        if save:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = os.path.join(self.output_dir,
+                                   f"{case_name}_{algorithm}_Infeasible_Heatmap_{timestamp}.png")
+            plt.savefig(filename, dpi=150, bbox_inches='tight')
+            logger.info(f"Saved Infeasible Heatmap + Table plot: {filename}")
+            plt.close()
+            return filename
+
+        plt.close()
+        return None
+
 
 def generate_plots_from_result_file(result_file: str, output_dir: str = "results") -> List[str]:
     """

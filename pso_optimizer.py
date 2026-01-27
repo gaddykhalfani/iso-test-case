@@ -112,6 +112,9 @@ class PSOResult:
     n_particles: int = 0
     n_iterations: int = 0
 
+    # RR sweep data from failed evaluations (infeasible designs)
+    failed_rr_sweeps: List[Dict] = field(default_factory=list)
+
     # Metadata
     case_name: str = ""
     algorithm: str = "PSO"
@@ -159,6 +162,9 @@ class PSOOptimizer:
         self.eval_count = 0
         self.feasible_count = 0
         self.infeasible_count = 0
+
+        # RR sweep data from failed evaluations (for infeasible design visualization)
+        self.failed_rr_sweeps = []
 
         # Set random seed
         if self.pso_config.seed is not None:
@@ -332,6 +338,7 @@ class PSOOptimizer:
             total_evaluations=self.eval_count,
             feasible_evaluations=self.feasible_count,
             infeasible_evaluations=self.infeasible_count,
+            failed_rr_sweeps=self.failed_rr_sweeps,
             n_particles=n_particles,
             n_iterations=n_iterations,
             case_name=case_name,
@@ -369,6 +376,16 @@ class PSOOptimizer:
         tac = result.get('TAC', float('inf'))
         T_reb = result.get('T_reb')
         converged = result.get('converged', False)
+
+        # Collect RR sweep data from failed evaluations (for infeasible design visualization)
+        if result.get('rr_sweep'):
+            self.failed_rr_sweeps.append({
+                'nt': nt,
+                'feed': feed,
+                'pressure': pressure,
+                'rr_sweep': result['rr_sweep']
+            })
+            logger.debug(f"  Collected RR sweep from failed design: NT={nt}, NF={feed}, P={pressure:.4f}")
 
         # If T_reb is None, cannot verify constraint -> treat as infeasible
         if T_reb is None:
@@ -490,6 +507,12 @@ def main():
         default=None,
         help="Path to run-specific config JSON file (for multi-run safety)"
     )
+    parser.add_argument(
+        "--isolated-file",
+        type=str,
+        default=None,
+        help="Path to isolated Aspen file copy (for concurrent run safety)"
+    )
 
     args = parser.parse_args()
 
@@ -550,7 +573,12 @@ def main():
         from tac_calculator import TACCalculator
         from tac_evaluator import TACEvaluator
 
-        aspen = AspenEnergyOptimizer(config['file_path'])
+        # Use isolated file if provided (for concurrent run safety), otherwise use config path
+        aspen_file_path = args.isolated_file or config['file_path']
+        if args.isolated_file:
+            logger.info(f"Using isolated Aspen file: {args.isolated_file}")
+
+        aspen = AspenEnergyOptimizer(aspen_file_path)
 
         if not aspen.connect_and_open(visible=True):
             logger.error("Failed to connect to Aspen Plus!")
@@ -654,65 +682,41 @@ def main():
         except Exception as e:
             logger.warning(f"Error generating plots: {e}")
 
-        # Generate Reflux Ratio vs Purity curve at optimal point
-        if not args.demo and purity_spec and aspen_instance:
+        # Generate Reflux Ratio vs Purity plot for INFEASIBLE designs
+        if not args.demo and purity_spec and result.failed_rr_sweeps:
             try:
                 logger.info("")
                 logger.info("=" * 70)
-                logger.info("POST-OPTIMIZATION: RR vs PURITY SWEEP")
+                logger.info("RR vs PURITY: INFEASIBLE DESIGN ANALYSIS")
                 logger.info("=" * 70)
-                logger.info(f"  Optimal config: NT={result.optimal_nt}, NF={result.optimal_feed}, "
-                           f"P={result.optimal_pressure:.4f} bar")
+                logger.info(f"  Collected {len(result.failed_rr_sweeps)} infeasible design(s) with RR sweep data")
 
-                rr_sweep_data = aspen_instance.sweep_rr_purity(
-                    block_name=config['column']['block_name'],
-                    nt=result.optimal_nt,
-                    feed=result.optimal_feed,
-                    pressure=result.optimal_pressure,
-                    feed_stream=config['column']['feed_stream'],
-                    rr_range=(0.5, 5.0),
-                    num_points=20,
-                    purity_spec=purity_spec
+                # Save infeasible design RR sweep data to JSON
+                rr_sweep_file = os.path.join(run_output_dir, f"{args.case}_PSO_infeasible_rr_sweeps.json")
+                with open(rr_sweep_file, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'case_name': args.case,
+                        'algorithm': 'PSO',
+                        'purity_spec': purity_spec,
+                        'infeasible_designs': result.failed_rr_sweeps,
+                    }, f, indent=2)
+                logger.info(f"Infeasible RR sweep data saved: {rr_sweep_file}")
+
+                # Generate plot for infeasible designs
+                from visualization_metaheuristic import MetaheuristicVisualizer
+                visualizer = MetaheuristicVisualizer(run_output_dir)
+                rr_plot = visualizer.plot_rr_vs_purity_infeasible(
+                    result.failed_rr_sweeps,
+                    algorithm="PSO",
+                    case_name=args.case,
+                    purity_target=purity_spec.get('target'),
                 )
-
-                if rr_sweep_data:
-                    # Save RR sweep data to JSON
-                    rr_sweep_file = os.path.join(run_output_dir, f"{args.case}_PSO_rr_vs_purity.json")
-                    with open(rr_sweep_file, 'w', encoding='utf-8') as f:
-                        json.dump({
-                            'case_name': args.case,
-                            'algorithm': 'PSO',
-                            'optimal': {
-                                'nt': result.optimal_nt,
-                                'feed': result.optimal_feed,
-                                'pressure': result.optimal_pressure,
-                                'tac': result.optimal_tac,
-                            },
-                            'purity_spec': purity_spec,
-                            'rr_sweep': rr_sweep_data,
-                        }, f, indent=2)
-                    logger.info(f"RR sweep data saved: {rr_sweep_file}")
-
-                    # Generate plot
-                    from visualization_metaheuristic import MetaheuristicVisualizer
-                    visualizer = MetaheuristicVisualizer(run_output_dir)
-                    rr_plot = visualizer.plot_rr_vs_purity(
-                        rr_sweep_data,
-                        algorithm="PSO",
-                        case_name=args.case,
-                        purity_target=purity_spec.get('target'),
-                        optimal_config={
-                            'nt': result.optimal_nt,
-                            'feed': result.optimal_feed,
-                            'pressure': result.optimal_pressure,
-                        }
-                    )
-                    if rr_plot:
-                        logger.info(f"RR vs Purity plot saved: {rr_plot}")
-                        print(f"RR vs Purity plot saved: {rr_plot}")
+                if rr_plot:
+                    logger.info(f"Infeasible RR vs Purity plot saved: {rr_plot}")
+                    print(f"Infeasible RR vs Purity plot saved: {rr_plot}")
 
             except Exception as e:
-                logger.warning(f"RR sweep failed: {e}")
+                logger.warning(f"Infeasible RR plot failed: {e}")
                 import traceback
                 traceback.print_exc()
 

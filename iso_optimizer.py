@@ -168,7 +168,10 @@ class ISOResult:
     total_evaluations: int = 0
     feasible_evaluations: int = 0
     infeasible_evaluations: int = 0
-    
+
+    # RR sweep data from failed evaluations (infeasible designs)
+    failed_rr_sweeps: List[Dict] = field(default_factory=list)
+
     # Metadata
     case_name: str = ""
     timestamp: str = ""
@@ -213,8 +216,8 @@ class ISOOptimizer:
         
         # Sweep settings
         self.pressure_points = config.get('pressure_points', 9)
-        self.nt_step = config.get('nt_step', 2)
-        self.feed_step = config.get('feed_step', 2)
+        self.nt_step = config.get('nt_step', 1)
+        self.feed_step = config.get('feed_step', 1)
         self.min_section_stages = config.get('min_section_stages', 3)
         
         # Temperature constraint (professor's requirement)
@@ -234,6 +237,9 @@ class ISOOptimizer:
         self.feasible_count = 0
         self.infeasible_count = 0
         self.start_time = None
+
+        # RR sweep data from failed evaluations (for infeasible design visualization)
+        self.failed_rr_sweeps = []
     
     def run(self, case_name: str = "Case") -> ISOResult:
         """
@@ -447,6 +453,7 @@ class ISOOptimizer:
             total_evaluations=self.eval_count,
             feasible_evaluations=self.feasible_count,
             infeasible_evaluations=self.infeasible_count,
+            failed_rr_sweeps=self.failed_rr_sweeps,
             case_name=case_name,
             timestamp=timestamp,
         )
@@ -675,7 +682,17 @@ class ISOOptimizer:
         # Evaluate using existing evaluator (with diagnostic on failure)
         self.eval_count += 1
         result = self.evaluator.evaluate(nt, feed, pressure, run_diagnostic_on_fail=True, rr_sweep_on_fail=True, purity_spec=self.purity_spec)
-        
+
+        # Collect RR sweep data from failed evaluations (for infeasible design visualization)
+        if result.get('rr_sweep'):
+            self.failed_rr_sweeps.append({
+                'nt': nt,
+                'feed': feed,
+                'pressure': pressure,
+                'rr_sweep': result['rr_sweep']
+            })
+            logger.debug(f"  Collected RR sweep from failed design: NT={nt}, NF={feed}, P={pressure:.4f}")
+
         # Extract values (with None safety)
         tac = result.get('TAC', float('inf'))
         converged = result.get('converged', False)

@@ -296,7 +296,8 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
                          sweep_feed_step: int = 2,
                          nt_range_around_opt: int = 20,
                          feed_range_around_opt: int = 10,
-                         run_config: dict = None):
+                         run_config: dict = None,
+                         isolated_file: str = None):
     """
     Run TRUE Iterative Sequential Optimization with Multiple U-Curves.
 
@@ -382,10 +383,15 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
     # ─────────────────────────────────────────────────────────────────────────
     # CONNECT TO ASPEN
     # ─────────────────────────────────────────────────────────────────────────
-    
+
+    # Use isolated file if provided (for concurrent run safety), otherwise use config path
+    aspen_file_path = isolated_file or config['file_path']
+    if isolated_file:
+        logger.info(f"Using isolated Aspen file: {isolated_file}")
+
     logger.info("Connecting to Aspen Plus...")
-    
-    aspen = AspenEnergyOptimizer(config['file_path'])
+
+    aspen = AspenEnergyOptimizer(aspen_file_path)
     
     if not aspen.connect_and_open(visible=True):
         logger.error("Failed to connect to Aspen Plus!")
@@ -474,51 +480,31 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
             )
 
         # ─────────────────────────────────────────────────────────────────────
-        # POST-OPTIMIZATION: RR vs PURITY SWEEP
+        # RR vs PURITY: INFEASIBLE DESIGN ANALYSIS
         # ─────────────────────────────────────────────────────────────────────
 
-        rr_sweep_data = None
-        if result and purity_spec:
+        if result and purity_spec and result.failed_rr_sweeps:
             try:
                 logger.info("")
                 logger.info("=" * 70)
-                logger.info("POST-OPTIMIZATION: RR vs PURITY SWEEP")
+                logger.info("RR vs PURITY: INFEASIBLE DESIGN ANALYSIS")
                 logger.info("=" * 70)
-                logger.info(f"  Optimal config: NT={result.optimal_nt}, NF={result.optimal_feed}, "
-                           f"P={result.optimal_pressure:.4f} bar")
+                logger.info(f"  Collected {len(result.failed_rr_sweeps)} infeasible design(s) with RR sweep data")
 
-                rr_sweep_data = aspen.sweep_rr_purity(
-                    block_name=config['column']['block_name'],
-                    nt=result.optimal_nt,
-                    feed=result.optimal_feed,
-                    pressure=result.optimal_pressure,
-                    feed_stream=config['column']['feed_stream'],
-                    rr_range=(0.5, 5.0),
-                    num_points=20,
-                    purity_spec=purity_spec
-                )
-
-                if rr_sweep_data:
-                    # Save RR sweep data to JSON
-                    import json as json_module
-                    rr_sweep_file = os.path.join(run_output_dir, f"{case_name}_ISO_rr_vs_purity.json")
-                    with open(rr_sweep_file, 'w', encoding='utf-8') as f:
-                        json_module.dump({
-                            'case_name': case_name,
-                            'algorithm': 'ISO',
-                            'optimal': {
-                                'nt': result.optimal_nt,
-                                'feed': result.optimal_feed,
-                                'pressure': result.optimal_pressure,
-                                'tac': result.optimal_tac,
-                            },
-                            'purity_spec': purity_spec,
-                            'rr_sweep': rr_sweep_data,
-                        }, f, indent=2)
-                    logger.info(f"RR sweep data saved: {rr_sweep_file}")
+                # Save infeasible design RR sweep data to JSON
+                import json as json_module
+                rr_sweep_file = os.path.join(run_output_dir, f"{case_name}_ISO_infeasible_rr_sweeps.json")
+                with open(rr_sweep_file, 'w', encoding='utf-8') as f:
+                    json_module.dump({
+                        'case_name': case_name,
+                        'algorithm': 'ISO',
+                        'purity_spec': purity_spec,
+                        'infeasible_designs': result.failed_rr_sweeps,
+                    }, f, indent=2)
+                logger.info(f"Infeasible RR sweep data saved: {rr_sweep_file}")
 
             except Exception as e:
-                logger.warning(f"RR sweep failed: {e}")
+                logger.warning(f"Infeasible RR sweep save failed: {e}")
                 import traceback
                 traceback.print_exc()
 
@@ -549,27 +535,22 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
             n_ucurves=7  # Number of U-curves to display
         )
 
-        # Generate RR vs Purity plot if sweep data available
-        if rr_sweep_data:
+        # Generate RR vs Purity plot for INFEASIBLE designs
+        if result and result.failed_rr_sweeps:
             try:
                 from visualization_metaheuristic import MetaheuristicVisualizer
                 meta_visualizer = MetaheuristicVisualizer(run_output_dir)
-                rr_plot = meta_visualizer.plot_rr_vs_purity(
-                    rr_sweep_data,
+                rr_plot = meta_visualizer.plot_rr_vs_purity_infeasible(
+                    result.failed_rr_sweeps,
                     algorithm="ISO",
                     case_name=case_name,
                     purity_target=purity_spec.get('target') if purity_spec else None,
-                    optimal_config={
-                        'nt': result.optimal_nt,
-                        'feed': result.optimal_feed,
-                        'pressure': result.optimal_pressure,
-                    }
                 )
                 if rr_plot:
                     plot_files.append(rr_plot)
-                    logger.info(f"RR vs Purity plot saved: {rr_plot}")
+                    logger.info(f"Infeasible RR vs Purity plot saved: {rr_plot}")
             except Exception as e:
-                logger.warning(f"Could not generate RR vs Purity plot: {e}")
+                logger.warning(f"Could not generate Infeasible RR vs Purity plot: {e}")
         
         # ─────────────────────────────────────────────────────────────────────
         # SAVE RESULTS
@@ -851,6 +832,12 @@ def parse_args():
         default=None,
         help="Path to run-specific config JSON file (for multi-run safety)"
     )
+    parser.add_argument(
+        "--isolated-file",
+        type=str,
+        default=None,
+        help="Path to isolated Aspen file copy (for concurrent run safety)"
+    )
     return parser.parse_args()
 
 
@@ -884,11 +871,16 @@ def main():
         run_sweep = not args.no_sweep
         print_header()
 
+        # Log isolated file if provided
+        if args.isolated_file:
+            print(f"Using isolated Aspen file: {args.isolated_file}", flush=True)
+
         # Pass run_config directly if loaded, otherwise use case_name to get default
         result = run_iso_optimization(
             case_name,
             run_post_sweep=run_sweep,
-            run_config=run_config  # Pass pre-loaded config if available
+            run_config=run_config,  # Pass pre-loaded config if available
+            isolated_file=args.isolated_file  # Pass isolated file for concurrent safety
         )
 
         # Exit with proper code

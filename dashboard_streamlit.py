@@ -6,6 +6,13 @@ Features:
 - Per-run configuration editing (multi-run safe)
 - Per-run case and algorithm selection
 - Live status and convergence tracking for all runs
+- Combined convergence chart overlay
+- 3D surface plots and heatmaps
+- Pareto front visualization
+- Statistics dashboard with analytics
+- Historical run comparison
+- Export to CSV/ZIP
+- Discord notifications
 - Results browser with plot viewing
 
 Usage:
@@ -23,9 +30,19 @@ import time
 import glob
 import json
 import requests
+import numpy as np
 from pathlib import Path
-from datetime import datetime
-from typing import Dict, Optional
+from datetime import datetime, timedelta
+from typing import Dict, Optional, List, Tuple
+from io import BytesIO
+
+# Plotly for interactive visualizations
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+
+# Pandas for data manipulation
+import pandas as pd
 
 # Number of concurrent run slots
 MAX_CONCURRENT_RUNS = 4
@@ -671,6 +688,560 @@ def get_active_runs_count() -> int:
     return count
 
 
+def get_all_convergence() -> Optional[Dict]:
+    """Fetch convergence history for all jobs (for combined chart)."""
+    try:
+        resp = requests.get(f"{API_BASE_URL}/convergence/all", timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except:
+        return None
+
+
+@st.cache_data(ttl=5)
+def get_logs(job_id: str, tail: int = 500) -> Optional[Dict]:
+    """Fetch logs for a specific job (cached for 5 seconds)."""
+    try:
+        params = {"tail": tail}
+        resp = requests.get(f"{API_BASE_URL}/logs/{job_id}", params=params, timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except:
+        return None
+
+
+@st.cache_data(ttl=30)
+def get_statistics() -> Optional[Dict]:
+    """Fetch aggregated statistics from all historical results."""
+    try:
+        resp = requests.get(f"{API_BASE_URL}/stats", timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except:
+        return None
+
+
+def set_discord_webhook(webhook_url: str) -> bool:
+    """Set the Discord webhook URL on the server."""
+    try:
+        resp = requests.post(f"{API_BASE_URL}/discord/webhook",
+                           json={"webhook_url": webhook_url}, timeout=5)
+        return resp.status_code == 200
+    except:
+        return False
+
+
+def test_discord_webhook(webhook_url: str = None) -> Dict:
+    """Test the Discord webhook by sending a test notification."""
+    try:
+        payload = {}
+        if webhook_url:
+            payload["webhook_url"] = webhook_url
+        resp = requests.post(f"{API_BASE_URL}/discord/test", json=payload, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"success": False, "message": f"HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@st.cache_data(ttl=300)
+def load_sweep_data(result_folder: str) -> Optional[List[Dict]]:
+    """Load sweep data from a result folder for 3D plots."""
+    sweep_files = glob.glob(os.path.join(result_folder, "*_NT_Feed_Sweep.json"))
+    if not sweep_files:
+        return None
+
+    all_points = []
+    for sweep_file in sweep_files:
+        try:
+            with open(sweep_file, 'r') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    all_points.extend(data)
+        except:
+            continue
+
+    return all_points if all_points else None
+
+
+def compute_pareto_frontier(points: List[Dict], x_key: str, y_key: str) -> List[Dict]:
+    """
+    Compute the Pareto frontier for minimizing both objectives.
+
+    Args:
+        points: List of evaluation points with x_key and y_key values
+        x_key: Key for first objective (e.g., 'tac')
+        y_key: Key for second objective (e.g., 'q_reb')
+
+    Returns:
+        List of non-dominated points forming the Pareto frontier
+    """
+    # Filter valid points
+    valid = [p for p in points if p.get(x_key) and p.get(y_key)
+             and p[x_key] < 1e10 and p[y_key] < 1e10]
+
+    if not valid:
+        return []
+
+    # Sort by x_key
+    sorted_pts = sorted(valid, key=lambda p: p[x_key])
+
+    # Build Pareto frontier (for minimization of both)
+    pareto = [sorted_pts[0]]
+    for p in sorted_pts[1:]:
+        if p[y_key] < pareto[-1][y_key]:
+            pareto.append(p)
+
+    return pareto
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# VISUALIZATION COMPONENTS
+# ════════════════════════════════════════════════════════════════════════════
+
+def render_combined_convergence_chart():
+    """Render a combined convergence chart showing all active/recent runs."""
+    conv_data = get_all_convergence()
+    if not conv_data or not conv_data.get("jobs"):
+        return
+
+    jobs_with_data = [j for j in conv_data["jobs"] if j.get("convergence_history")]
+    if not jobs_with_data:
+        return
+
+    st.markdown("""
+    <div style="
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+    ">
+        <span style="font-size: 1.1rem; color: #4fc3f7;">📈</span>
+        <h4 style="margin: 0; color: #e6edf3; font-weight: 600;">Live Convergence Comparison</h4>
+    </div>
+    """, unsafe_allow_html=True)
+
+    fig = go.Figure()
+
+    for job in jobs_with_data:
+        history = job["convergence_history"]
+        algo = job.get("algorithm", "ISO")
+        case = job.get("case", "Unknown")
+        status = job.get("status", "")
+
+        # Extract iterations and TAC values
+        iterations = [h.get("iteration", i) for i, h in enumerate(history)]
+        tac_values = [h.get("best_tac", 0) for h in history]
+
+        # Filter out invalid TAC values
+        valid_data = [(it, tac) for it, tac in zip(iterations, tac_values) if tac and tac < 1e10]
+        if not valid_data:
+            continue
+
+        iterations, tac_values = zip(*valid_data)
+
+        color = ALGO_COLORS.get(algo, '#8b949e')
+        dash = 'solid' if status == 'running' else 'dot'
+
+        fig.add_trace(go.Scatter(
+            x=list(iterations),
+            y=list(tac_values),
+            mode='lines+markers',
+            name=f"{case} ({algo})",
+            line=dict(color=color, width=2, dash=dash),
+            marker=dict(size=4),
+            hovertemplate=f"<b>{case}</b><br>Iter: %{{x}}<br>TAC: $%{{y:,.0f}}<extra>{algo}</extra>"
+        ))
+
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(30, 32, 48, 0.6)',
+        xaxis_title="Iteration",
+        yaxis_title="Best TAC ($/year)",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            bgcolor='rgba(30, 32, 48, 0.8)'
+        ),
+        margin=dict(l=60, r=20, t=40, b=40),
+        height=300,
+        yaxis=dict(tickformat="$,.0f"),
+    )
+
+    st.plotly_chart(fig, width='stretch')
+
+
+def render_3d_surface_plot(sweep_data: List[Dict], pressure_value: float = None):
+    """Render a 3D surface plot of TAC as a function of NT and Feed."""
+    if not sweep_data:
+        st.info("No sweep data available for 3D visualization.")
+        return
+
+    # Convert to DataFrame
+    df = pd.DataFrame(sweep_data)
+
+    # Filter by pressure if specified
+    if pressure_value is not None and 'pressure' in df.columns:
+        df = df[abs(df['pressure'] - pressure_value) < 0.01]
+
+    if df.empty or 'nt' not in df.columns or 'feed' not in df.columns:
+        st.info("Insufficient data for 3D surface plot.")
+        return
+
+    # Get unique NT and Feed values
+    nt_values = sorted(df['nt'].unique())
+    feed_values = sorted(df['feed'].unique())
+
+    if len(nt_values) < 2 or len(feed_values) < 2:
+        st.info("Need more data points for 3D surface.")
+        return
+
+    # Create TAC matrix
+    tac_matrix = np.full((len(feed_values), len(nt_values)), np.nan)
+    t_reb_matrix = np.full((len(feed_values), len(nt_values)), np.nan)
+
+    for _, row in df.iterrows():
+        try:
+            nt_idx = nt_values.index(row['nt'])
+            feed_idx = feed_values.index(row['feed'])
+            tac = row.get('tac', row.get('TAC', np.nan))
+            if tac and tac < 1e10:
+                tac_matrix[feed_idx, nt_idx] = tac
+                t_reb_matrix[feed_idx, nt_idx] = row.get('T_reb', np.nan)
+        except (ValueError, KeyError):
+            continue
+
+    # Create 3D surface
+    fig = go.Figure(data=[go.Surface(
+        x=nt_values,
+        y=feed_values,
+        z=tac_matrix,
+        colorscale='Viridis',
+        contours=dict(
+            z=dict(show=True, usecolormap=True, highlightcolor="white", project_z=True)
+        ),
+        hovertemplate="NT: %{x}<br>Feed: %{y}<br>TAC: $%{z:,.0f}<extra></extra>"
+    )])
+
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        scene=dict(
+            xaxis_title='Number of Trays (NT)',
+            yaxis_title='Feed Stage',
+            zaxis_title='TAC ($/year)',
+            bgcolor='rgba(30, 32, 48, 0.6)',
+        ),
+        margin=dict(l=0, r=0, t=30, b=0),
+        height=500,
+    )
+
+    st.plotly_chart(fig, width='stretch')
+
+
+def render_heatmap(sweep_data: List[Dict], z_key: str = 'tac', pressure_value: float = None):
+    """Render a 2D heatmap of NT vs Feed."""
+    if not sweep_data:
+        st.info("No data available for heatmap.")
+        return
+
+    df = pd.DataFrame(sweep_data)
+
+    # Filter by pressure if specified
+    if pressure_value is not None and 'pressure' in df.columns:
+        df = df[abs(df['pressure'] - pressure_value) < 0.01]
+
+    if df.empty or 'nt' not in df.columns or 'feed' not in df.columns:
+        st.info("Insufficient data for heatmap.")
+        return
+
+    # Pivot for heatmap
+    z_column = z_key if z_key in df.columns else 'tac' if 'tac' in df.columns else 'TAC'
+
+    # Filter valid values
+    df = df[df[z_column] < 1e10]
+
+    if df.empty:
+        st.info("No valid data points for heatmap.")
+        return
+
+    pivot = df.pivot_table(index='feed', columns='nt', values=z_column, aggfunc='mean')
+
+    # Color scale based on metric
+    if z_key in ['T_reb', 't_reb']:
+        colorscale = 'RdYlBu_r'  # Red for hot, blue for cold
+        title = 'Reboiler Temperature (°C)'
+    else:
+        colorscale = 'RdYlGn_r'  # Red for high TAC, green for low
+        title = 'TAC ($/year)'
+
+    fig = go.Figure(data=go.Heatmap(
+        x=pivot.columns.tolist(),
+        y=pivot.index.tolist(),
+        z=pivot.values,
+        colorscale=colorscale,
+        hovertemplate='NT: %{x}<br>Feed: %{y}<br>Value: %{z:,.1f}<extra></extra>'
+    ))
+
+    # Add contour lines
+    fig.update_traces(
+        contours=dict(
+            showlines=True,
+            linewidth=1,
+            linecolor='rgba(255,255,255,0.3)'
+        )
+    )
+
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(30, 32, 48, 0.6)',
+        xaxis_title='Number of Trays (NT)',
+        yaxis_title='Feed Stage',
+        coloraxis_colorbar_title=title,
+        margin=dict(l=60, r=20, t=30, b=40),
+        height=400,
+    )
+
+    st.plotly_chart(fig, width='stretch')
+
+
+def render_pareto_front(points: List[Dict]):
+    """Render Pareto front visualization for TAC vs Energy."""
+    if not points:
+        st.info("No data available for Pareto front.")
+        return
+
+    # Filter valid points
+    valid = [p for p in points if p.get('tac') and p.get('q_reb')
+             and p['tac'] < 1e10 and p['q_reb'] < 1e10]
+
+    if len(valid) < 3:
+        st.info("Need more data points for Pareto front visualization.")
+        return
+
+    # Compute Pareto frontier
+    pareto = compute_pareto_frontier(valid, 'tac', 'q_reb')
+
+    fig = go.Figure()
+
+    # All points
+    fig.add_trace(go.Scatter(
+        x=[p['tac'] for p in valid],
+        y=[p['q_reb'] for p in valid],
+        mode='markers',
+        name='All Evaluations',
+        marker=dict(size=6, color='rgba(139, 148, 158, 0.4)'),
+        hovertemplate='TAC: $%{x:,.0f}<br>Q_reb: %{y:.1f} kW<extra></extra>'
+    ))
+
+    # Pareto frontier
+    if pareto:
+        fig.add_trace(go.Scatter(
+            x=[p['tac'] for p in pareto],
+            y=[p['q_reb'] for p in pareto],
+            mode='lines+markers',
+            name='Pareto Frontier',
+            line=dict(color='#ef5350', width=3),
+            marker=dict(size=10, color='#ef5350'),
+            hovertemplate='<b>Pareto Optimal</b><br>TAC: $%{x:,.0f}<br>Q_reb: %{y:.1f} kW<extra></extra>'
+        ))
+
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(30, 32, 48, 0.6)',
+        xaxis_title='Total Annual Cost ($/year)',
+        yaxis_title='Reboiler Energy (kW)',
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="right",
+            x=0.99,
+            bgcolor='rgba(30, 32, 48, 0.8)'
+        ),
+        margin=dict(l=60, r=20, t=30, b=40),
+        height=400,
+        xaxis=dict(tickformat="$,.0f"),
+    )
+
+    st.plotly_chart(fig, width='stretch')
+
+
+def render_run_timeline(results: List[Dict]):
+    """Render a timeline of optimization runs."""
+    if not results:
+        st.info("No runs to display in timeline.")
+        return
+
+    # Parse timestamps and prepare data
+    timeline_data = []
+    for r in results:
+        try:
+            modified = r.get('modified', '')
+            if modified:
+                timestamp = datetime.fromisoformat(modified.replace('Z', '+00:00'))
+            else:
+                continue
+
+            timeline_data.append({
+                'timestamp': timestamp,
+                'case': r.get('case_name', r.get('case', 'Unknown')),
+                'algorithm': r.get('algorithm', 'ISO'),
+                'tac': r.get('optimal_tac', 0),
+                'filename': r.get('filename', ''),
+            })
+        except:
+            continue
+
+    if not timeline_data:
+        st.info("No valid timestamps for timeline.")
+        return
+
+    df = pd.DataFrame(timeline_data)
+    df = df.sort_values('timestamp')
+
+    fig = go.Figure()
+
+    for algo in ['ISO', 'PSO', 'GA']:
+        algo_df = df[df['algorithm'] == algo]
+        if algo_df.empty:
+            continue
+
+        fig.add_trace(go.Scatter(
+            x=algo_df['timestamp'],
+            y=[algo] * len(algo_df),
+            mode='markers',
+            name=algo,
+            marker=dict(
+                size=15,
+                color=ALGO_COLORS.get(algo, '#8b949e'),
+                symbol='circle',
+            ),
+            hovertemplate='<b>%{customdata[0]}</b><br>TAC: $%{customdata[1]:,.0f}<br>%{x}<extra>' + algo + '</extra>',
+            customdata=list(zip(algo_df['case'], algo_df['tac'])),
+        ))
+
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(30, 32, 48, 0.6)',
+        xaxis_title='Time',
+        yaxis_title='Algorithm',
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+        ),
+        margin=dict(l=60, r=20, t=40, b=40),
+        height=250,
+    )
+
+    st.plotly_chart(fig, width='stretch')
+
+
+def render_algorithm_comparison(stats: Dict):
+    """Render algorithm performance comparison charts."""
+    if not stats:
+        return
+
+    by_algo = stats.get("by_algorithm", {})
+
+    # Prepare data for comparison
+    algos = []
+    avg_tacs = []
+    min_tacs = []
+    avg_times = []
+    counts = []
+
+    for algo in ['ISO', 'PSO', 'GA']:
+        algo_stats = by_algo.get(algo, {})
+        if isinstance(algo_stats, dict) and algo_stats.get("count", 0) > 0:
+            algos.append(algo)
+            avg_tacs.append(algo_stats.get("avg_tac", 0))
+            min_tacs.append(algo_stats.get("min_tac", 0))
+            avg_times.append(algo_stats.get("avg_time", 0))
+            counts.append(algo_stats.get("count", 0))
+
+    if not algos:
+        st.info("No algorithm data available for comparison.")
+        return
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # TAC comparison
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=algos,
+            y=avg_tacs,
+            name='Average TAC',
+            marker_color=[ALGO_COLORS.get(a, '#8b949e') for a in algos],
+            text=[f'${t:,.0f}' if t else 'N/A' for t in avg_tacs],
+            textposition='outside',
+        ))
+        fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(30, 32, 48, 0.6)',
+            title="Average TAC by Algorithm",
+            yaxis_title="TAC ($/year)",
+            yaxis=dict(tickformat="$,.0f"),
+            height=300,
+            margin=dict(l=60, r=20, t=50, b=40),
+        )
+        st.plotly_chart(fig, width='stretch')
+
+    with col2:
+        # Time comparison
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=algos,
+            y=avg_times,
+            name='Average Time',
+            marker_color=[ALGO_COLORS.get(a, '#8b949e') for a in algos],
+            text=[f'{t:.1f}s' if t else 'N/A' for t in avg_times],
+            textposition='outside',
+        ))
+        fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(30, 32, 48, 0.6)',
+            title="Average Time by Algorithm",
+            yaxis_title="Time (seconds)",
+            height=300,
+            margin=dict(l=60, r=20, t=50, b=40),
+        )
+        st.plotly_chart(fig, width='stretch')
+
+    # Run count pie chart
+    fig = go.Figure(data=[go.Pie(
+        labels=algos,
+        values=counts,
+        hole=0.4,
+        marker=dict(colors=[ALGO_COLORS.get(a, '#8b949e') for a in algos]),
+    )])
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        title="Runs by Algorithm",
+        height=300,
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    st.plotly_chart(fig, width='stretch')
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # RUN SLOT COMPONENT - Renders a single run panel with config editing
 # ════════════════════════════════════════════════════════════════════════════
@@ -734,7 +1305,9 @@ def render_run_slot(slot_id: int, available_cases: list, api_ok: bool):
                 key=f"{prefix}algo_select",
                 disabled=job_status == "running"
             )
-            st.session_state[f"{prefix}algorithm"] = algorithm
+            # Only update session state on actual change to avoid refresh
+            if algorithm != st.session_state.get(f"{prefix}algorithm"):
+                st.session_state[f"{prefix}algorithm"] = algorithm
 
         with col3:
             demo_mode = st.checkbox(
@@ -744,7 +1317,9 @@ def render_run_slot(slot_id: int, available_cases: list, api_ok: bool):
                 disabled=job_status == "running",
                 help="Run without Aspen"
             )
-            st.session_state[f"{prefix}demo_mode"] = demo_mode
+            # Only update session state on actual change to avoid refresh
+            if demo_mode != st.session_state.get(f"{prefix}demo_mode"):
+                st.session_state[f"{prefix}demo_mode"] = demo_mode
 
         # Row 2: Config Editor (expandable)
         defaults = get_column_defaults(case) if case else {}
@@ -1012,7 +1587,7 @@ st.sidebar.markdown("""
 # Mode selection
 mode = st.sidebar.radio(
     "Mode",
-    ["Run Optimization", "Results Browser", "Demo Gallery"],
+    ["Run Optimization", "Statistics", "Analysis", "Results Browser"],
     index=0
 )
 st.session_state.mode = mode
@@ -1115,6 +1690,105 @@ if st.sidebar.button("Clear Completed"):
             st.session_state[f"run_{slot}_convergence_history"] = []
     st.rerun()
 
+# Export section
+st.sidebar.markdown("---")
+st.sidebar.markdown("""
+<div style="
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+">
+    &#128229; Export
+</div>
+""", unsafe_allow_html=True)
+
+# CSV Export button
+if st.sidebar.button("Download Results (CSV)"):
+    try:
+        resp = requests.get(f"{API_BASE_URL}/export/results/csv", timeout=30)
+        if resp.status_code == 200:
+            st.sidebar.download_button(
+                label="Save CSV",
+                data=resp.content,
+                file_name="optimization_results.csv",
+                mime="text/csv",
+                key="csv_download"
+            )
+        else:
+            st.sidebar.error("Failed to export CSV")
+    except Exception as e:
+        st.sidebar.error(f"Export error: {e}")
+
+# ZIP Plots button
+if st.sidebar.button("Download Plots (ZIP)"):
+    try:
+        resp = requests.get(f"{API_BASE_URL}/export/plots/zip", timeout=60)
+        if resp.status_code == 200:
+            st.sidebar.download_button(
+                label="Save ZIP",
+                data=resp.content,
+                file_name=f"plots_{datetime.now().strftime('%Y%m%d')}.zip",
+                mime="application/zip",
+                key="zip_download"
+            )
+        else:
+            st.sidebar.error("No plots found or export failed")
+    except Exception as e:
+        st.sidebar.error(f"Export error: {e}")
+
+# Discord Notifications section
+st.sidebar.markdown("---")
+with st.sidebar.expander("Discord Notifications", expanded=False):
+    st.caption("Get notified when runs complete")
+
+    # Initialize webhook URL in session state
+    if "discord_webhook" not in st.session_state:
+        st.session_state["discord_webhook"] = ""
+
+    webhook_url = st.text_input(
+        "Webhook URL",
+        value=st.session_state.get("discord_webhook", ""),
+        type="password",
+        placeholder="https://discord.com/api/webhooks/...",
+        key="discord_webhook_input"
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Save", key="save_webhook"):
+            if webhook_url:
+                if set_discord_webhook(webhook_url):
+                    st.session_state["discord_webhook"] = webhook_url
+                    st.success("Saved!")
+                else:
+                    st.error("Failed to save")
+            else:
+                set_discord_webhook("")
+                st.session_state["discord_webhook"] = ""
+                st.info("Cleared")
+
+    with col2:
+        if st.button("Test", key="test_webhook"):
+            result = test_discord_webhook(webhook_url or st.session_state.get("discord_webhook"))
+            if result.get("success"):
+                st.success("Sent!")
+            else:
+                st.error(result.get("message", "Failed"))
+
+    st.caption("""
+    **Setup:**
+    1. Open Discord Server Settings
+    2. Go to Integrations → Webhooks
+    3. Create New Webhook
+    4. Copy the URL and paste above
+    """)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # MAIN CONTENT
@@ -1172,28 +1846,255 @@ if mode == "Run Optimization":
     """, unsafe_allow_html=True)
     st.caption("Configure and run up to 4 optimizations concurrently. Each run has isolated configuration (multi-run safe).")
 
-    # Check for any running jobs and auto-refresh
+    # Check for any running jobs
     any_running = any(
         st.session_state.get(f"run_{slot}_job_status") == "running"
         for slot in range(MAX_CONCURRENT_RUNS)
     )
 
+    # Combined Convergence Chart (if any jobs have data)
+    if any_running or any(st.session_state.get(f"run_{slot}_job_id") for slot in range(MAX_CONCURRENT_RUNS)):
+        render_combined_convergence_chart()
+
     # Render run slots in a 2x2 grid
     col_left, col_right = st.columns(2)
-
     with col_left:
         render_run_slot(0, available_cases, api_ok)
         render_run_slot(2, available_cases, api_ok)
-
     with col_right:
         render_run_slot(1, available_cases, api_ok)
         render_run_slot(3, available_cases, api_ok)
 
-    # Auto-refresh if any job is running
+    # Detailed Logs Panel
+    st.markdown("---")
+    with st.expander("Detailed Logs", expanded=False):
+        log_tabs = st.tabs([f"Run {i+1}" for i in range(MAX_CONCURRENT_RUNS)])
+
+        for slot, tab in enumerate(log_tabs):
+            with tab:
+                job_id = st.session_state.get(f"run_{slot}_job_id")
+                if job_id:
+                    filter_text = st.text_input("Filter", key=f"log_filter_{slot}", placeholder="Search logs...")
+                    # Fetch logs without filter (avoids API call on every keystroke)
+                    log_data = get_logs(job_id, tail=200)
+                    if log_data and log_data.get("logs"):
+                        logs = log_data["logs"]
+                        # Apply filter client-side
+                        if filter_text:
+                            logs = [line for line in logs if filter_text.lower() in line.lower()]
+                        st.caption(f"Showing {len(logs)} of {log_data['total_lines']} lines")
+                        log_text = "\n".join(logs)
+                        st.code(log_text, language="text")
+                    else:
+                        st.caption("No logs available")
+                else:
+                    st.caption("No job running in this slot")
+
+    # Auto-refresh while jobs are running (5 second interval)
     if any_running:
-        st.caption("Dashboard auto-refreshes while jobs are running...")
-        time.sleep(3)
+        time.sleep(5)
         st.rerun()
+
+
+elif mode == "Statistics":
+    st.markdown("""
+    <div style="
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 0.5rem;
+    ">
+        <span style="font-size: 1.3rem; color: #66bb6a;">&#128202;</span>
+        <h2 style="margin: 0; color: #e6edf3; font-weight: 700; letter-spacing: -0.01em;">Statistics Dashboard</h2>
+    </div>
+    """, unsafe_allow_html=True)
+    st.caption("Aggregated metrics and performance analysis across all historical runs.")
+
+    # Fetch statistics
+    stats = get_statistics()
+
+    if not stats or stats.get("total_runs", 0) == 0:
+        st.info("No historical runs found. Run some optimizations first!")
+    else:
+        # Top metrics row
+        m1, m2, m3, m4 = st.columns(4)
+
+        with m1:
+            st.metric("Total Runs", stats.get("total_runs", 0))
+        with m2:
+            best_tac = stats.get("best_tac_ever")
+            st.metric("Best TAC Ever", f"${best_tac:,.0f}" if best_tac else "N/A")
+        with m3:
+            st.metric("Total Evaluations", f"{stats.get('total_evaluations', 0):,}")
+        with m4:
+            total_time = stats.get("total_time_seconds", 0)
+            st.metric("Total Compute Time", f"{total_time/3600:.1f} hrs" if total_time > 3600 else f"{total_time:.0f}s")
+
+        # Best run info
+        best_run = stats.get("best_run")
+        if best_run:
+            st.markdown("---")
+            st.markdown(f"""
+            <div style="
+                background: rgba(79, 195, 247, 0.08);
+                border: 1px solid rgba(79, 195, 247, 0.2);
+                border-radius: 10px;
+                padding: 1rem;
+                margin: 0.5rem 0;
+            ">
+                <div style="font-weight: 600; color: #4fc3f7; margin-bottom: 0.5rem;">Best Run</div>
+                <div style="color: #c9d1d9;">
+                    <strong>{best_run.get('case', 'Unknown')}</strong> using <strong>{best_run.get('algorithm', 'ISO')}</strong><br>
+                    TAC: <strong>${stats.get('best_tac_ever', 0):,.0f}/year</strong><br>
+                    Config: NT={best_run.get('optimal', {}).get('nt', '?')}, Feed={best_run.get('optimal', {}).get('feed', '?')}, P={best_run.get('optimal', {}).get('pressure', 0):.3f} bar
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # Algorithm comparison
+        st.subheader("Algorithm Performance Comparison")
+        render_algorithm_comparison(stats)
+
+        # Run history timeline
+        st.markdown("---")
+        st.subheader("Run History Timeline")
+        results = fetch_results_list()
+        render_run_timeline(results)
+
+
+elif mode == "Analysis":
+    st.markdown("""
+    <div style="
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 0.5rem;
+    ">
+        <span style="font-size: 1.3rem; color: #e040fb;">&#128300;</span>
+        <h2 style="margin: 0; color: #e6edf3; font-weight: 700; letter-spacing: -0.01em;">Analysis Tools</h2>
+    </div>
+    """, unsafe_allow_html=True)
+    st.caption("3D surface plots, sensitivity heatmaps, and Pareto front analysis.")
+
+    # Get result folders with sweep data
+    result_folders = sorted(glob.glob(str(RESULTS_DIR / "Case*")), key=os.path.getmtime, reverse=True)
+
+    analysis_tab1, analysis_tab2, analysis_tab3, analysis_tab4 = st.tabs([
+        "3D Surface Plot", "Sensitivity Heatmap", "Pareto Front", "Run Comparison"
+    ])
+
+    with analysis_tab1:
+        st.subheader("TAC Surface: f(NT, Feed)")
+
+        if result_folders:
+            selected_folder = st.selectbox("Select Result", result_folders,
+                format_func=lambda x: os.path.basename(x))
+
+            if selected_folder:
+                sweep_data = load_sweep_data(selected_folder)
+                if sweep_data:
+                    # Check if there are multiple pressure values
+                    pressures = list(set(p.get('pressure') for p in sweep_data if p.get('pressure')))
+                    if len(pressures) > 1:
+                        selected_pressure = st.select_slider("Pressure (bar)", options=sorted(pressures))
+                    else:
+                        selected_pressure = pressures[0] if pressures else None
+
+                    render_3d_surface_plot(sweep_data, selected_pressure)
+                else:
+                    st.info("No sweep data found in this result folder.")
+        else:
+            st.info("No result folders found. Run an ISO optimization to generate sweep data.")
+
+    with analysis_tab2:
+        st.subheader("Parameter Sensitivity Heatmap")
+
+        if result_folders:
+            selected_folder2 = st.selectbox("Select Result", result_folders,
+                format_func=lambda x: os.path.basename(x), key="heatmap_folder")
+
+            if selected_folder2:
+                sweep_data = load_sweep_data(selected_folder2)
+                if sweep_data:
+                    metric = st.radio("Metric", ["TAC", "T_reb (Temperature)"], horizontal=True)
+                    z_key = 'tac' if metric == "TAC" else 'T_reb'
+                    render_heatmap(sweep_data, z_key=z_key)
+                else:
+                    st.info("No sweep data found in this result folder.")
+        else:
+            st.info("No result folders found.")
+
+    with analysis_tab3:
+        st.subheader("Pareto Front: TAC vs Energy")
+
+        if result_folders:
+            selected_folder3 = st.selectbox("Select Result", result_folders,
+                format_func=lambda x: os.path.basename(x), key="pareto_folder")
+
+            if selected_folder3:
+                sweep_data = load_sweep_data(selected_folder3)
+                if sweep_data:
+                    # Check if we have q_reb data
+                    has_energy = any(p.get('q_reb') or p.get('Q_reb') for p in sweep_data)
+                    if has_energy:
+                        # Normalize key names
+                        for p in sweep_data:
+                            if 'Q_reb' in p and 'q_reb' not in p:
+                                p['q_reb'] = p['Q_reb']
+                            if 'TAC' in p and 'tac' not in p:
+                                p['tac'] = p['TAC']
+                        render_pareto_front(sweep_data)
+                    else:
+                        st.info("Energy data (Q_reb) not available in this sweep. Run with full evaluation to get energy data.")
+                else:
+                    st.info("No sweep data found in this result folder.")
+        else:
+            st.info("No result folders found.")
+
+    with analysis_tab4:
+        st.subheader("Historical Run Comparison")
+
+        results = fetch_results_list()
+        if results:
+            # Filter out config files
+            results = [r for r in results if "run_config" not in r.get("filename", "")]
+
+            if len(results) >= 2:
+                selected_runs = st.multiselect(
+                    "Select runs to compare (up to 3)",
+                    options=[r.get("filename") for r in results],
+                    max_selections=3,
+                    default=[results[0].get("filename")] if results else []
+                )
+
+                if selected_runs:
+                    cols = st.columns(len(selected_runs))
+
+                    # Find best TAC among selected for comparison
+                    selected_data = [r for r in results if r.get("filename") in selected_runs]
+                    best_tac = min(r.get("optimal_tac", float('inf')) for r in selected_data if r.get("optimal_tac"))
+
+                    for i, (run_name, col) in enumerate(zip(selected_runs, cols)):
+                        run_data = next((r for r in results if r.get("filename") == run_name), {})
+                        with col:
+                            st.markdown(f"**{run_name[:30]}...**" if len(run_name) > 30 else f"**{run_name}**")
+                            tac = run_data.get("optimal_tac", 0)
+                            delta = tac - best_tac if i > 0 and tac and best_tac else None
+                            st.metric("TAC", f"${tac:,.0f}" if tac else "N/A",
+                                     delta=f"+${delta:,.0f}" if delta else None,
+                                     delta_color="inverse")
+                            st.write(f"**Case:** {run_data.get('case_name', 'N/A')}")
+                            st.write(f"**Algorithm:** {run_data.get('algorithm', 'ISO')}")
+                            st.write(f"**NT:** {run_data.get('optimal_nt', 'N/A')}")
+                            st.write(f"**Feed:** {run_data.get('optimal_feed', 'N/A')}")
+                            st.write(f"**Pressure:** {run_data.get('optimal_pressure', 'N/A')}")
+                            st.write(f"**Time:** {run_data.get('time_seconds', 0):.1f}s")
+            else:
+                st.info("Need at least 2 results to compare.")
+        else:
+            st.info("No results found.")
 
 
 elif mode == "Results Browser":
@@ -1274,103 +2175,9 @@ elif mode == "Results Browser":
         cols = st.columns(2)
         for i, plot in enumerate(filtered_plots[:10]):
             with cols[i % 2]:
-                st.image(plot, caption=os.path.basename(plot), use_container_width=True)
+                st.image(plot, caption=os.path.basename(plot), width='stretch')
     else:
         st.info("No plots found in results folder.")
-
-
-elif mode == "Demo Gallery":
-    st.markdown("""
-    <div style="
-        display: flex;
-        align-items: center;
-        gap: 0.75rem;
-        margin-bottom: 0.5rem;
-    ">
-        <span style="font-size: 1.3rem; color: #66bb6a;">&#127912;</span>
-        <h2 style="margin: 0; color: #e6edf3; font-weight: 700; letter-spacing: -0.01em;">Demo Gallery</h2>
-    </div>
-    """, unsafe_allow_html=True)
-    st.caption("Pre-generated results and plots for demonstration.")
-
-    # Show sample images
-    st.subheader("Sample U-Curves")
-
-    png_files = sorted(glob.glob(str(RESULTS_DIR / "*.png")), key=os.path.getmtime, reverse=True)
-
-    if png_files:
-        # Categories
-        ucurve_plots = [p for p in png_files if "UCurve" in os.path.basename(p) or "U_curve" in os.path.basename(p)]
-        pressure_plots = [p for p in png_files if "Pressure" in os.path.basename(p)]
-        summary_plots = [p for p in png_files if "Summary" in os.path.basename(p)]
-        other_plots = [p for p in png_files if p not in ucurve_plots + pressure_plots + summary_plots]
-
-        tab1, tab2, tab3, tab4 = st.tabs(["U-Curves", "Pressure Sweeps", "Summaries", "Other"])
-
-        with tab1:
-            if ucurve_plots:
-                for plot in ucurve_plots[:6]:
-                    st.image(plot, caption=os.path.basename(plot), use_container_width=True)
-            else:
-                st.info("No U-curve plots found")
-
-        with tab2:
-            if pressure_plots:
-                for plot in pressure_plots[:6]:
-                    st.image(plot, caption=os.path.basename(plot), use_container_width=True)
-            else:
-                st.info("No pressure sweep plots found")
-
-        with tab3:
-            if summary_plots:
-                for plot in summary_plots[:6]:
-                    st.image(plot, caption=os.path.basename(plot), use_container_width=True)
-            else:
-                st.info("No summary plots found")
-
-        with tab4:
-            if other_plots:
-                cols = st.columns(2)
-                for i, plot in enumerate(other_plots[:8]):
-                    with cols[i % 2]:
-                        st.image(plot, caption=os.path.basename(plot), use_container_width=True)
-            else:
-                st.info("No other plots found")
-
-    else:
-        st.info("No plots found. Run an optimization to generate plots!")
-
-    # Sample JSON
-    st.markdown("---")
-    st.subheader("Sample Results")
-
-    json_files = sorted(glob.glob(str(RESULTS_DIR / "*.json")), key=os.path.getmtime, reverse=True)
-
-    if json_files:
-        selected_json = st.selectbox("Select result file", json_files[:10])
-
-        if selected_json:
-            try:
-                with open(selected_json, 'r') as f:
-                    data = json.load(f)
-
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.write("**Optimal Configuration:**")
-                    st.json(data.get("optimal", {}))
-
-                with col2:
-                    st.write("**Statistics:**")
-                    st.json(data.get("statistics", {}))
-
-                with st.expander("Full JSON"):
-                    st.json(data)
-
-            except Exception as e:
-                st.error(f"Error loading: {e}")
-    else:
-        st.info("No result files found.")
 
 
 # ════════════════════════════════════════════════════════════════════════════
