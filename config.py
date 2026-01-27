@@ -48,7 +48,7 @@ COLUMN_TEMPLATES = {
     },
     'COL3': {
         'block_name': 'COL3',
-        'feed_stream': 'EBTOL',
+        'feed_stream': 'LIQPROD2',
         'description': 'Benzene/Toluene Separation',
         'nt_bounds': (15, 45),
         'feed_bounds': (5, 30),
@@ -59,7 +59,7 @@ COLUMN_TEMPLATES = {
     },
     'COL4': {
         'block_name': 'COL4',
-        'feed_stream': 'STYRENE',
+        'feed_stream': 'LIQPROD',
         'description': 'Light Ends Removal',
         'nt_bounds': (15, 85),
         'feed_bounds': (10, 80),
@@ -70,7 +70,7 @@ COLUMN_TEMPLATES = {
     },
     'COL5': {
         'block_name': 'COL5',
-        'feed_stream': 'LIQPROD4',
+        'feed_stream': 'HEAVY1',
         'description': 'Heavy Ends Separation',
         'nt_bounds': (15, 45),
         'feed_bounds': (5, 40),

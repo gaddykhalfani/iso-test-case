@@ -62,9 +62,9 @@ class TACEvaluator:
         self.failed_count = 0
     
     def _make_key(self, nt, feed, pressure):
-        """Create cache key from parameters."""
+        """Create cache key from parameters, including block name for isolation."""
         p_rounded = round(pressure, self.p_precision)
-        return (int(nt), int(feed), p_rounded)
+        return (self.block_name, int(nt), int(feed), p_rounded)
     
     def _check_aspen_convergence(self):
         """Check if Aspen simulation actually converged."""

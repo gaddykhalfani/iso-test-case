@@ -164,7 +164,7 @@ class AspenEnergyOptimizer:
             self.aspen.Engine.Run2()
 
             elapsed = time.time() - start_time
-            logger.info("Simulation completed in {:.1f}s".format(elapsed))
+            logger.info(f"Simulation completed in {elapsed:.1f}s")
 
             return True
 
