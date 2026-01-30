@@ -468,6 +468,72 @@ def init_run_slot(slot_id: int):
 for slot in range(MAX_CONCURRENT_RUNS):
     init_run_slot(slot)
 
+
+def recover_session_from_server():
+    """Recover job state from server after session reset.
+
+    When the Streamlit session drops (browser idle, page refresh), all
+    session_state is lost.  This function queries the FastAPI backend for
+    any known jobs and re-populates the run slots so the user can still
+    see their active or recently-completed runs.
+    """
+    if st.session_state.get("_session_recovered"):
+        return
+    st.session_state["_session_recovered"] = True
+
+    # Check if any slot already has a job (not a fresh session)
+    has_existing = any(
+        st.session_state.get(f"run_{s}_job_id")
+        for s in range(MAX_CONCURRENT_RUNS)
+    )
+    if has_existing:
+        return
+
+    try:
+        resp = requests.get(f"{API_BASE_URL}/jobs", timeout=5)
+        if resp.status_code != 200:
+            return
+        server_jobs = resp.json()
+    except Exception:
+        return
+
+    if not server_jobs:
+        return
+
+    slot = 0
+    for job_info in server_jobs:
+        if slot >= MAX_CONCURRENT_RUNS:
+            break
+
+        job_id = job_info.get("job_id")
+        if not job_id:
+            continue
+
+        # Fetch full status details for this job
+        try:
+            detail_resp = requests.get(
+                f"{API_BASE_URL}/status/{job_id}", timeout=5
+            )
+            details = detail_resp.json() if detail_resp.status_code == 200 else {}
+        except Exception:
+            details = {}
+
+        prefix = f"run_{slot}_"
+        st.session_state[f"{prefix}job_id"] = job_id
+        st.session_state[f"{prefix}job_status"] = job_info.get("status", details.get("status"))
+        st.session_state[f"{prefix}last_progress"] = details.get("last_progress", {})
+        st.session_state[f"{prefix}algorithm"] = details.get(
+            "algorithm", job_info.get("algorithm", "ISO")
+        )
+        st.session_state[f"{prefix}selected_case"] = details.get(
+            "case", job_info.get("case")
+        )
+        slot += 1
+
+
+# Recover jobs from server if this is a fresh session
+recover_session_from_server()
+
 # Global mode selection
 if "mode" not in st.session_state:
     st.session_state.mode = "Run Optimization"
@@ -1890,11 +1956,7 @@ if mode == "Run Optimization":
                 else:
                     st.caption("No job running in this slot")
 
-    # Auto-refresh while jobs are running (5 second interval)
-    if any_running:
-        time.sleep(5)
-        st.rerun()
-
+    # Note: Auto-refresh moved to global scope at end of script
 
 elif mode == "Statistics":
     st.markdown("""
@@ -2202,3 +2264,28 @@ st.markdown(f"""
     <span><span style="color: #ffb74d;">&#9679;</span> <strong style="color: #c9d1d9;">Max Concurrent:</strong> {MAX_CONCURRENT_RUNS}</span>
 </div>
 """, unsafe_allow_html=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# GLOBAL AUTO-REFRESH / SESSION KEEPALIVE
+# ════════════════════════════════════════════════════════════════════════════
+# Runs at end of every script execution to keep session alive.
+# - 5 second interval while jobs are running (fast updates)
+# - 30 second interval when completed jobs exist (keepalive to prevent
+#   Streamlit session timeout and loss of run state)
+
+_any_jobs_running = any(
+    st.session_state.get(f"run_{slot}_job_status") == "running"
+    for slot in range(MAX_CONCURRENT_RUNS)
+)
+_has_any_jobs = any(
+    st.session_state.get(f"run_{slot}_job_id")
+    for slot in range(MAX_CONCURRENT_RUNS)
+)
+
+if _any_jobs_running:
+    time.sleep(5)
+    st.rerun()
+elif _has_any_jobs:
+    time.sleep(30)
+    st.rerun()

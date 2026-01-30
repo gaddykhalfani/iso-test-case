@@ -227,13 +227,19 @@ if PYMOO_AVAILABLE:
 
 
     class ProgressCallback(Callback):
-        """Callback to emit progress during GA evolution."""
+        """Callback to emit progress during GA evolution with early stopping."""
 
-        def __init__(self, n_generations: int, optimizer_ref=None):
+        def __init__(self, n_generations: int, optimizer_ref=None, early_stopping_patience: int = 15):
             super().__init__()
             self.n_generations = n_generations
             self.optimizer_ref = optimizer_ref
             self.best_history = []
+            # Early stopping parameters
+            self.early_stopping_patience = early_stopping_patience
+            self.no_improvement_count = 0
+            self.prev_best_tac = float('inf')
+            self.early_stopped = False
+            self.early_stop_gen = None
 
         def notify(self, algorithm):
             gen = algorithm.n_gen
@@ -271,6 +277,27 @@ if PYMOO_AVAILABLE:
             )
 
             logger.info(f"Generation {gen}: Best TAC = ${best_tac:,.0f}")
+
+            # Early stopping check
+            if best_tac < self.prev_best_tac - 1e-6:  # Meaningful improvement
+                self.prev_best_tac = best_tac
+                self.no_improvement_count = 0
+            else:
+                self.no_improvement_count += 1
+
+            if self.no_improvement_count >= self.early_stopping_patience:
+                logger.info(f"Early stopping at generation {gen} - no improvement for {self.early_stopping_patience} generations")
+                _emit_progress(
+                    iteration=gen,
+                    phase="early_stopping",
+                    current=gen,
+                    total=self.n_generations,
+                    best_tac=best_tac if best_tac < 1e10 else None,
+                    message=f"Early stopping - converged at generation {gen}"
+                )
+                self.early_stopped = True
+                self.early_stop_gen = gen
+                algorithm.termination.force_termination = True
 
 
 # ════════════════════════════════════════════════════════════════════════════

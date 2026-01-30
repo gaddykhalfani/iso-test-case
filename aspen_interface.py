@@ -787,6 +787,47 @@ class AspenEnergyOptimizer:
             logger.warning("Error getting Vary {} info: {}".format(vary_num, e))
             return None
 
+    def get_all_vary_blocks(self, block_name, max_vary=5):
+        """
+        Get all existing Vary blocks for a RadFrac block.
+
+        This discovers the actual Vary-to-Spec associations which may not
+        follow the pattern vary_num == spec_num.
+
+        Parameters
+        ----------
+        block_name : str
+            Name of the RadFrac block
+        max_vary : int
+            Maximum number of Vary blocks to check (default: 5)
+
+        Returns
+        -------
+        list : List of dicts with keys: 'vary_num', 'spec_num', 'active'
+        """
+        vary_blocks = []
+        for vary_num in range(1, max_vary + 1):
+            base = "\\Data\\Blocks\\{}\\Subobjects\\Vary\\{}".format(block_name, vary_num)
+            # Check if this Vary block exists
+            try:
+                node = self.aspen.Tree.FindNode(base)
+                if node is None:
+                    continue
+
+                # Check which spec this Vary is associated with (check specs 1-5)
+                for spec_num in range(1, 6):
+                    active_path = base + "\\Input\\VARY_ACTIVE\\{}".format(spec_num)
+                    active_node = self.aspen.Tree.FindNode(active_path)
+                    if active_node and active_node.Value:
+                        vary_blocks.append({
+                            'vary_num': vary_num,
+                            'spec_num': spec_num,
+                            'active': active_node.Value
+                        })
+            except:
+                continue
+        return vary_blocks
+
     def get_stream_purity(self, stream_name, component, fraction_type='MASSFRAC'):
         """
         Get component fraction in a stream.
@@ -918,11 +959,19 @@ class AspenEnergyOptimizer:
         # Get Vary info before diagnostic
         vary_before = self.get_vary_info(block_name)
 
-        # 2. Turn off ALL active Design Specs AND Vary blocks
+        # 2. Turn off ALL active Design Specs
         for spec_num in active_spec_nums:
             self.set_design_spec_active(block_name, spec_num=spec_num, active=False)
-            # Also turn off corresponding Vary block
-            self.set_vary_active(block_name, vary_num=spec_num, spec_num=spec_num, active=False)
+
+        # Turn off ALL Vary blocks (discover actual Vary-Spec associations)
+        all_vary_blocks = self.get_all_vary_blocks(block_name)
+        if all_vary_blocks:
+            logger.info("  Found {} Vary blocks: {}".format(
+                len(all_vary_blocks),
+                [(vb['vary_num'], vb['spec_num']) for vb in all_vary_blocks]))
+        for vb in all_vary_blocks:
+            self.set_vary_active(block_name, vary_num=vb['vary_num'],
+                                 spec_num=vb['spec_num'], active=False)
 
         # 3. Set parameters (they should already be set, but ensure)
         self.set_parameters(block_name, nt, feed, pressure, feed_stream)
@@ -983,10 +1032,14 @@ class AspenEnergyOptimizer:
         # 5. Restore ALL Design Specs AND Vary blocks that were originally active
         for spec_num in active_spec_nums:
             self.set_design_spec_active(block_name, spec_num=spec_num, active=True)
-            # Also restore corresponding Vary block
-            self.set_vary_active(block_name, vary_num=spec_num, spec_num=spec_num, active=True)
-        if active_spec_nums:
-            logger.info("  Restored {} Design Specs and Vary blocks to ACTIVE".format(len(active_spec_nums)))
+        # Restore all Vary blocks that were originally active
+        for vb in all_vary_blocks:
+            if vb['active'] == 'YES':
+                self.set_vary_active(block_name, vary_num=vb['vary_num'],
+                                     spec_num=vb['spec_num'], active=True)
+        if active_spec_nums or all_vary_blocks:
+            logger.info("  Restored {} Design Specs and {} Vary blocks to ACTIVE".format(
+                len(active_spec_nums), len([vb for vb in all_vary_blocks if vb['active'] == 'YES'])))
 
         logger.info("=" * 50)
 
@@ -1139,10 +1192,19 @@ class AspenEnergyOptimizer:
                 len(active_specs), active_spec_nums))
             logger.info("  Turning OFF all Design Specs AND Vary blocks for forward mode...")
 
+        # Turn off all Design Specs
         for spec_num in active_spec_nums:
             self.set_design_spec_active(block_name, spec_num=spec_num, active=False)
-            # Also turn off corresponding Vary block
-            self.set_vary_active(block_name, vary_num=spec_num, spec_num=spec_num, active=False)
+
+        # Turn off ALL Vary blocks (discover actual Vary-Spec associations)
+        all_vary_blocks = self.get_all_vary_blocks(block_name)
+        if all_vary_blocks:
+            logger.info("  Found {} Vary blocks: {}".format(
+                len(all_vary_blocks),
+                [(vb['vary_num'], vb['spec_num']) for vb in all_vary_blocks]))
+        for vb in all_vary_blocks:
+            self.set_vary_active(block_name, vary_num=vb['vary_num'],
+                                 spec_num=vb['spec_num'], active=False)
 
         # 3. Set column parameters (NT, NF, P)
         self.set_parameters(block_name, nt, feed, pressure, feed_stream)
@@ -1199,10 +1261,14 @@ class AspenEnergyOptimizer:
         logger.info("")
         for spec_num in active_spec_nums:
             self.set_design_spec_active(block_name, spec_num=spec_num, active=True)
-            # Also restore corresponding Vary block
-            self.set_vary_active(block_name, vary_num=spec_num, spec_num=spec_num, active=True)
-        if active_spec_nums:
-            logger.info("  Restored {} Design Specs and Vary blocks to ACTIVE".format(len(active_spec_nums)))
+        # Restore all Vary blocks that were originally active
+        for vb in all_vary_blocks:
+            if vb['active'] == 'YES':
+                self.set_vary_active(block_name, vary_num=vb['vary_num'],
+                                     spec_num=vb['spec_num'], active=True)
+        if active_spec_nums or all_vary_blocks:
+            logger.info("  Restored {} Design Specs and {} Vary blocks to ACTIVE".format(
+                len(active_spec_nums), len([vb for vb in all_vary_blocks if vb['active'] == 'YES'])))
 
         # 5. Analyze results
         converged_points = [r for r in results if r['converged']]

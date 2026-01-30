@@ -230,6 +230,11 @@ class PSOOptimizer:
         convergence_history = []
         best_positions_history = []
 
+        # Early stopping parameters
+        early_stopping_patience = 15  # Stop if no improvement for 15 iterations
+        no_improvement_count = 0
+        prev_best_fitness = float('inf')
+
         # ════════════════════════════════════════════════════════════════════
         # MAIN PSO LOOP
         # ════════════════════════════════════════════════════════════════════
@@ -308,6 +313,25 @@ class PSOOptimizer:
             })
 
             logger.info(f"Iteration {iteration + 1}: Best TAC = ${gbest_fitness:,.0f}")
+
+            # Early stopping check
+            if gbest_fitness < prev_best_fitness - 1e-6:  # Meaningful improvement
+                prev_best_fitness = gbest_fitness
+                no_improvement_count = 0
+            else:
+                no_improvement_count += 1
+
+            if no_improvement_count >= early_stopping_patience:
+                logger.info(f"Early stopping at iteration {iteration + 1} - no improvement for {early_stopping_patience} iterations")
+                _emit_progress(
+                    iteration=iteration + 1,
+                    phase="early_stopping",
+                    current=iteration + 1,
+                    total=n_iterations,
+                    best_tac=gbest_fitness if gbest_fitness < 1e10 else None,
+                    message=f"Early stopping - converged at iteration {iteration + 1}"
+                )
+                break
 
         # ════════════════════════════════════════════════════════════════════
         # BUILD RESULT
