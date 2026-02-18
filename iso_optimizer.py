@@ -88,14 +88,25 @@ T_REBOILER_MAX = 120.0  # C - Professor's hard constraint
 TAC_TOLERANCE = 100  # $/year - TAC change threshold
 MAX_OUTER_ITERATIONS = 10  # Safety limit
 
+# U-curve validation criteria
+MIN_CONSECUTIVE_FEASIBLE = 3  # Minimum consecutive feasible NT points required
+U_CURVE_NEIGHBOR_CHECK = True  # Require neighbors to have higher TAC (proper minimum)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # FEASIBILITY STATUS
 # ════════════════════════════════════════════════════════════════════════════
 
 class FeasibilityStatus(Enum):
-    """Feasibility status for evaluated points."""
-    FEASIBLE = "feasible"
+    """Feasibility status for evaluated points.
+
+    FEASIBLE (hard feasible): Naturally converged with Aspen Design Specs
+    SOFT_FEASIBLE: RR-recovered point - thermodynamically possible but solver couldn't
+                   find it naturally. These are valid but should be deprioritized
+                   in favor of naturally converged points.
+    """
+    FEASIBLE = "feasible"              # Hard feasible - naturally converged
+    SOFT_FEASIBLE = "soft_feasible"    # RR-recovered - valid but deprioritized
     INFEASIBLE_TEMPERATURE = "infeasible_temperature"
     INFEASIBLE_CONVERGENCE = "infeasible_convergence"
     INFEASIBLE_SEPARATION = "infeasible_separation"
@@ -122,6 +133,7 @@ class EvaluationPoint:
     converged: bool = False
     feasibility: FeasibilityStatus = FeasibilityStatus.FEASIBLE
     infeasibility_reason: str = ""
+    reflux_ratio: float = None
 
 
 @dataclass
@@ -234,12 +246,17 @@ class ISOOptimizer:
         
         # Statistics
         self.eval_count = 0
-        self.feasible_count = 0
+        self.feasible_count = 0       # Hard feasible (naturally converged)
+        self.soft_feasible_count = 0  # Soft feasible (RR-recovered)
         self.infeasible_count = 0
         self.start_time = None
 
         # RR sweep data from failed evaluations (for infeasible design visualization)
         self.failed_rr_sweeps = []
+
+        # Baseline TAC recording (for improvement metrics)
+        self.baseline_result = None
+        self.baseline_tac = None
     
     def run(self, case_name: str = "Case") -> ISOResult:
         """
@@ -280,9 +297,43 @@ class ISOOptimizer:
         
         logger.info("")
         logger.info(f"INITIAL: NT={current_nt}, NF={current_feed}, P={current_pressure:.4f} bar")
-        
+
+        # ════════════════════════════════════════════════════════════════════
+        # BASELINE TAC EVALUATION
+        # ════════════════════════════════════════════════════════════════════
+
+        logger.info("")
+        logger.info("=" * 50)
+        logger.info("EVALUATING BASELINE TAC (Initial Configuration)")
+        logger.info("=" * 50)
+
+        _emit_progress(
+            iteration=0,
+            phase="baseline_evaluation",
+            message="Evaluating baseline TAC at initial configuration"
+        )
+
+        baseline_result = self._evaluate_with_feasibility(
+            current_nt, current_feed, current_pressure
+        )
+        self.baseline_result = baseline_result
+
+        if baseline_result.converged and baseline_result.feasibility in (FeasibilityStatus.FEASIBLE, FeasibilityStatus.SOFT_FEASIBLE):
+            self.baseline_tac = baseline_result.tac
+            logger.info(f"  BASELINE TAC: ${self.baseline_tac:,.0f}/year")
+            logger.info(f"  Configuration: NT={current_nt}, NF={current_feed}, P={current_pressure:.4f} bar")
+            if baseline_result.feasibility == FeasibilityStatus.SOFT_FEASIBLE:
+                logger.warning("  NOTE: Baseline is SOFT FEASIBLE (RR-recovered)")
+        else:
+            self.baseline_tac = None
+            logger.warning("  Baseline did not converge or is infeasible")
+            logger.warning(f"  Reason: {baseline_result.feasibility.value}")
+            logger.info("  Proceeding without baseline comparison")
+
+        logger.info("=" * 50)
+
         converged = False
-        
+
         # ════════════════════════════════════════════════════════════════════
         # OUTER ITERATION LOOP
         # ════════════════════════════════════════════════════════════════════
@@ -330,10 +381,11 @@ class ISOOptimizer:
             if pressure_sweep.optimal_tac < float('inf'):
                 current_pressure = pressure_sweep.optimal_value
                 logger.info(f"  -> P* = {current_pressure:.4f} bar, TAC=${pressure_sweep.optimal_tac:,.0f}")
-                # Log feasible/infeasible counts from this sweep
-                feasible_pts = sum(1 for p in pressure_sweep.points if p.feasibility == FeasibilityStatus.FEASIBLE)
-                infeasible_pts = len(pressure_sweep.points) - feasible_pts
-                logger.info(f"     ({feasible_pts} feasible, {infeasible_pts} infeasible out of {len(pressure_sweep.points)} points)")
+                # Log feasible/infeasible counts from this sweep (both hard and soft feasible)
+                hard_feasible_pts = sum(1 for p in pressure_sweep.points if p.feasibility == FeasibilityStatus.FEASIBLE)
+                soft_feasible_pts = sum(1 for p in pressure_sweep.points if p.feasibility == FeasibilityStatus.SOFT_FEASIBLE)
+                infeasible_pts = len(pressure_sweep.points) - hard_feasible_pts - soft_feasible_pts
+                logger.info(f"     ({hard_feasible_pts} hard feasible, {soft_feasible_pts} soft feasible, {infeasible_pts} infeasible out of {len(pressure_sweep.points)} points)")
             else:
                 logger.warning("  No feasible pressure found! Keeping previous pressure.")
                 logger.warning(f"  All {len(pressure_sweep.points)} points were infeasible")
@@ -354,12 +406,81 @@ class ISOOptimizer:
             )
 
             nt_sweep = self._sweep_nt(current_pressure, current_feed, iteration)
-            
+
             if nt_sweep.optimal_tac < float('inf'):
                 current_nt = int(nt_sweep.optimal_value)
                 # Update feed if it's now invalid for new NT
                 current_feed = self._adjust_feed_for_nt(current_feed, current_nt)
                 logger.info(f"  -> NT* = {current_nt}")
+
+                # ────────────────────────────────────────────────────────────────
+                # U-CURVE VALIDATION CHECK
+                # ────────────────────────────────────────────────────────────────
+                is_valid, consec_count, reason = self._validate_u_curve_quality(
+                    current_pressure, current_feed
+                )
+
+                if is_valid:
+                    logger.info(f"  [OK] U-curve validation passed ({consec_count} consecutive feasible points)")
+                else:
+                    logger.warning(f"  [!] U-curve validation FAILED: {reason}")
+                    logger.warning(f"      This may indicate an edge-case optimum at P={current_pressure:.4f} bar")
+
+                    # Try to find alternative pressure with valid U-curve
+                    logger.info("  Searching for alternative pressure with valid U-curve...")
+
+                    # Get feasible pressures sorted by TAC (prefer hard feasible, then soft feasible)
+                    # First get hard feasible pressures
+                    hard_feasible_pressures = [
+                        (p.pressure, p.tac, 'hard')
+                        for p in pressure_sweep.points
+                        if p.feasibility == FeasibilityStatus.FEASIBLE and p.pressure != current_pressure
+                    ]
+                    # Then soft feasible pressures
+                    soft_feasible_pressures = [
+                        (p.pressure, p.tac, 'soft')
+                        for p in pressure_sweep.points
+                        if p.feasibility == FeasibilityStatus.SOFT_FEASIBLE and p.pressure != current_pressure
+                    ]
+                    # Combine: hard feasible first (sorted by TAC), then soft feasible (sorted by TAC)
+                    hard_feasible_pressures.sort(key=lambda x: x[1])
+                    soft_feasible_pressures.sort(key=lambda x: x[1])
+                    feasible_pressures = [(p, t) for p, t, _ in hard_feasible_pressures] + [(p, t) for p, t, _ in soft_feasible_pressures]
+
+                    found_valid = False
+                    for alt_pressure, alt_tac in feasible_pressures:
+                        # Do a quick NT sweep at this alternative pressure
+                        logger.info(f"    Testing P={alt_pressure:.4f} bar...")
+                        alt_nt_sweep = self._sweep_nt(alt_pressure, current_feed, iteration)
+
+                        if alt_nt_sweep.optimal_tac < float('inf'):
+                            # Check U-curve quality
+                            alt_valid, alt_count, alt_reason = self._validate_u_curve_quality(
+                                alt_pressure, current_feed
+                            )
+
+                            if alt_valid:
+                                logger.info(f"    [OK] Found valid U-curve at P={alt_pressure:.4f} bar")
+                                logger.info(f"         TAC=${alt_nt_sweep.optimal_tac:,.0f} vs edge-case TAC=${nt_sweep.optimal_tac:,.0f}")
+
+                                # Check if the TAC difference is acceptable (within 50% of edge case)
+                                tac_ratio = alt_nt_sweep.optimal_tac / nt_sweep.optimal_tac
+                                if tac_ratio < 1.5:  # Within 50% is acceptable
+                                    current_pressure = alt_pressure
+                                    current_nt = int(alt_nt_sweep.optimal_value)
+                                    current_feed = self._adjust_feed_for_nt(current_feed, current_nt)
+                                    nt_sweep = alt_nt_sweep  # Update sweep for later use
+                                    logger.info(f"    -> SWITCHED to P={current_pressure:.4f}, NT={current_nt}")
+                                    found_valid = True
+                                    break
+                                else:
+                                    logger.info(f"    TAC too high ({tac_ratio:.1f}x), continuing search...")
+                            else:
+                                logger.info(f"    U-curve invalid: {alt_reason}")
+
+                    if not found_valid:
+                        logger.warning("  No alternative pressure found with valid U-curve")
+                        logger.warning("  Proceeding with edge-case pressure (results may be unstable)")
             else:
                 logger.warning("  No feasible NT found!")
             
@@ -504,45 +625,72 @@ class ISOOptimizer:
         logger.info(f"{'Pressure':^10} {'T_reb':^10} {'TAC':^15} {'Status':^25}")
         logger.info("-" * 60)
 
-        best_tac = float('inf')
-        best_pressure = p_min
+        # Track best hard feasible and soft feasible separately
+        best_hard_tac = float('inf')
+        best_hard_pressure = p_min
+        best_soft_tac = float('inf')
+        best_soft_pressure = p_min
         total_points = len(pressures)
 
+        last_rr = None  # RR warm-starting for sweep continuity
         for idx, p in enumerate(pressures):
-            point = self._evaluate_with_feasibility(fixed_nt, fixed_feed, p)
+            point = self._evaluate_with_feasibility(fixed_nt, fixed_feed, p, rr_hint=last_rr)
             result.points.append(point)
+            if point.feasibility == FeasibilityStatus.FEASIBLE and point.reflux_ratio is not None:
+                last_rr = point.reflux_ratio
 
-            # Emit progress
+            # Emit progress (use overall best for display)
+            current_best = min(best_hard_tac, best_soft_tac)
             _emit_progress(
                 iteration=iteration,
                 phase="pressure_sweep",
                 current=idx + 1,
                 total=total_points,
-                best_tac=best_tac if best_tac < float('inf') else None,
+                best_tac=current_best if current_best < float('inf') else None,
                 pressure=round(p, 4),
                 T_reb=round(point.T_reb, 1) if point.T_reb > 0 else None
             )
-            
-            # Format status
+
+            # Format status - prioritize hard feasible over soft feasible
             if point.feasibility == FeasibilityStatus.FEASIBLE:
                 status = "OK"
-                if point.tac < best_tac:
-                    best_tac = point.tac
-                    best_pressure = p
+                if point.tac < best_hard_tac:
+                    best_hard_tac = point.tac
+                    best_hard_pressure = p
                     status = "*** BEST ***"
+            elif point.feasibility == FeasibilityStatus.SOFT_FEASIBLE:
+                status = "~OK (RR-recovered)"
+                if point.tac < best_soft_tac:
+                    best_soft_tac = point.tac
+                    best_soft_pressure = p
+                    # Only show as best if no hard feasible exists
+                    if best_hard_tac >= float('inf'):
+                        status = "~~ SOFT BEST ~~"
             elif point.feasibility == FeasibilityStatus.INFEASIBLE_TEMPERATURE:
                 status = "[X] T_reb > 120C"
             else:
                 status = f"[X] {point.infeasibility_reason[:20]}"
-            
+
             tac_str = f"${point.tac:,.0f}" if point.tac < 1e10 else "N/A"
             T_str = f"{point.T_reb:.1f}C" if point.T_reb > 0 else "N/A"
-            
+
             logger.info(f"{p:^10.4f} {T_str:^10} {tac_str:^15} {status:^25}")
-        
-        result.optimal_value = best_pressure
-        result.optimal_tac = best_tac
-        
+
+        # Select optimal: prefer hard feasible, fallback to soft feasible
+        if best_hard_tac < float('inf'):
+            result.optimal_value = best_hard_pressure
+            result.optimal_tac = best_hard_tac
+            logger.info(f"  -> Selected HARD FEASIBLE: P={best_hard_pressure:.4f}, TAC=${best_hard_tac:,.0f}")
+        elif best_soft_tac < float('inf'):
+            result.optimal_value = best_soft_pressure
+            result.optimal_tac = best_soft_tac
+            logger.warning(f"  -> Selected SOFT FEASIBLE (no hard feasible available): P={best_soft_pressure:.4f}, TAC=${best_soft_tac:,.0f}")
+            logger.warning(f"     WARNING: This is an RR-recovered point - results may be less reliable")
+        else:
+            result.optimal_value = p_min
+            result.optimal_tac = float('inf')
+            logger.warning("  -> No feasible pressure found!")
+
         return result
     
     def _sweep_nt(self, fixed_pressure: float, fixed_feed: int, iteration: int = 1) -> SweepResult:
@@ -563,44 +711,76 @@ class ISOOptimizer:
         logger.info(f"{'NT':^8} {'TAC':^15} {'Status':^20}")
         logger.info("-" * 45)
 
-        best_tac = float('inf')
-        best_nt = nt_min
+        # Track best hard feasible and soft feasible separately
+        best_hard_tac = float('inf')
+        best_hard_nt = nt_min
+        best_soft_tac = float('inf')
+        best_soft_nt = nt_min
         total_points = len(nt_values)
 
+        last_rr = None  # RR warm-starting for sweep continuity
         for idx, nt in enumerate(nt_values):
             # Adjust feed if needed
             adjusted_feed = self._adjust_feed_for_nt(fixed_feed, nt)
-            
+
             if adjusted_feed < self.min_section_stages + 1:
                 continue  # Skip invalid configurations
-            
-            point = self._evaluate_with_feasibility(nt, adjusted_feed, fixed_pressure)
-            result.points.append(point)
 
-            if point.feasibility == FeasibilityStatus.FEASIBLE and point.tac < best_tac:
-                best_tac = point.tac
-                best_nt = nt
-                status = "*** BEST ***"
-            elif point.feasibility == FeasibilityStatus.FEASIBLE:
-                status = "OK"
+            point = self._evaluate_with_feasibility(nt, adjusted_feed, fixed_pressure, rr_hint=last_rr)
+            result.points.append(point)
+            if point.feasibility == FeasibilityStatus.FEASIBLE and point.reflux_ratio is not None:
+                last_rr = point.reflux_ratio
+
+            # Format status - prioritize hard feasible over soft feasible
+            if point.feasibility == FeasibilityStatus.FEASIBLE:
+                if point.tac < best_hard_tac:
+                    best_hard_tac = point.tac
+                    best_hard_nt = nt
+                    status = "*** BEST ***"
+                else:
+                    status = "OK"
+            elif point.feasibility == FeasibilityStatus.SOFT_FEASIBLE:
+                if point.tac < best_soft_tac:
+                    best_soft_tac = point.tac
+                    best_soft_nt = nt
+                    # Only show as best if no hard feasible exists
+                    if best_hard_tac >= float('inf'):
+                        status = "~~ SOFT BEST ~~"
+                    else:
+                        status = "~OK (RR-recovered)"
+                else:
+                    status = "~OK (RR-recovered)"
             else:
                 status = f"[X] {point.infeasibility_reason[:15]}"
 
             tac_str = f"${point.tac:,.0f}" if point.tac < 1e10 else "N/A"
             logger.info(f"{nt:^8} {tac_str:^15} {status:^20}")
 
-            # Emit progress
+            # Emit progress (use overall best for display)
+            current_best = min(best_hard_tac, best_soft_tac)
             _emit_progress(
                 iteration=iteration,
                 phase="nt_sweep",
                 current=idx + 1,
                 total=total_points,
-                best_tac=best_tac if best_tac < float('inf') else None,
+                best_tac=current_best if current_best < float('inf') else None,
                 nt=nt
             )
 
-        result.optimal_value = best_nt
-        result.optimal_tac = best_tac
+        # Select optimal: prefer hard feasible, fallback to soft feasible
+        if best_hard_tac < float('inf'):
+            result.optimal_value = best_hard_nt
+            result.optimal_tac = best_hard_tac
+            logger.info(f"  -> Selected HARD FEASIBLE: NT={best_hard_nt}, TAC=${best_hard_tac:,.0f}")
+        elif best_soft_tac < float('inf'):
+            result.optimal_value = best_soft_nt
+            result.optimal_tac = best_soft_tac
+            logger.warning(f"  -> Selected SOFT FEASIBLE (no hard feasible available): NT={best_soft_nt}, TAC=${best_soft_tac:,.0f}")
+            logger.warning(f"     WARNING: This is an RR-recovered point - results may be less reliable")
+        else:
+            result.optimal_value = nt_min
+            result.optimal_tac = float('inf')
+            logger.warning("  -> No feasible NT found!")
 
         return result
 
@@ -629,46 +809,275 @@ class ISOOptimizer:
         logger.info(f"{'Feed':^8} {'TAC':^15} {'Status':^20}")
         logger.info("-" * 45)
 
-        best_tac = float('inf')
-        best_feed = f_min
+        # Track best hard feasible and soft feasible separately
+        best_hard_tac = float('inf')
+        best_hard_feed = f_min
+        best_soft_tac = float('inf')
+        best_soft_feed = f_min
         total_points = len(feed_values)
 
+        last_rr = None  # RR warm-starting for sweep continuity
         for idx, feed in enumerate(feed_values):
-            point = self._evaluate_with_feasibility(fixed_nt, feed, fixed_pressure)
+            point = self._evaluate_with_feasibility(fixed_nt, feed, fixed_pressure, rr_hint=last_rr)
             result.points.append(point)
-            
-            if point.feasibility == FeasibilityStatus.FEASIBLE and point.tac < best_tac:
-                best_tac = point.tac
-                best_feed = feed
-                status = "*** BEST ***"
-            elif point.feasibility == FeasibilityStatus.FEASIBLE:
-                status = "OK"
+            if point.feasibility == FeasibilityStatus.FEASIBLE and point.reflux_ratio is not None:
+                last_rr = point.reflux_ratio
+
+            # Format status - prioritize hard feasible over soft feasible
+            if point.feasibility == FeasibilityStatus.FEASIBLE:
+                if point.tac < best_hard_tac:
+                    best_hard_tac = point.tac
+                    best_hard_feed = feed
+                    status = "*** BEST ***"
+                else:
+                    status = "OK"
+            elif point.feasibility == FeasibilityStatus.SOFT_FEASIBLE:
+                if point.tac < best_soft_tac:
+                    best_soft_tac = point.tac
+                    best_soft_feed = feed
+                    # Only show as best if no hard feasible exists
+                    if best_hard_tac >= float('inf'):
+                        status = "~~ SOFT BEST ~~"
+                    else:
+                        status = "~OK (RR-recovered)"
+                else:
+                    status = "~OK (RR-recovered)"
             else:
                 status = f"[X] {point.infeasibility_reason[:15]}"
-            
+
             tac_str = f"${point.tac:,.0f}" if point.tac < 1e10 else "N/A"
             logger.info(f"{feed:^8} {tac_str:^15} {status:^20}")
 
-            # Emit progress
+            # Emit progress (use overall best for display)
+            current_best = min(best_hard_tac, best_soft_tac)
             _emit_progress(
                 iteration=iteration,
                 phase="feed_sweep",
                 current=idx + 1,
                 total=total_points,
-                best_tac=best_tac if best_tac < float('inf') else None,
+                best_tac=current_best if current_best < float('inf') else None,
                 feed=feed
             )
 
-        result.optimal_value = best_feed
-        result.optimal_tac = best_tac
+        # Select optimal: prefer hard feasible, fallback to soft feasible
+        if best_hard_tac < float('inf'):
+            result.optimal_value = best_hard_feed
+            result.optimal_tac = best_hard_tac
+            logger.info(f"  -> Selected HARD FEASIBLE: NF={best_hard_feed}, TAC=${best_hard_tac:,.0f}")
+        elif best_soft_tac < float('inf'):
+            result.optimal_value = best_soft_feed
+            result.optimal_tac = best_soft_tac
+            logger.warning(f"  -> Selected SOFT FEASIBLE (no hard feasible available): NF={best_soft_feed}, TAC=${best_soft_tac:,.0f}")
+            logger.warning(f"     WARNING: This is an RR-recovered point - results may be less reliable")
+        else:
+            result.optimal_value = f_min
+            result.optimal_tac = float('inf')
+            logger.warning("  -> No feasible feed found!")
 
         return result
+
+    # ════════════════════════════════════════════════════════════════════════
+    # U-CURVE VALIDATION
+    # ════════════════════════════════════════════════════════════════════════
+
+    def _validate_u_curve_quality(self, pressure: float, fixed_feed: int) -> Tuple[bool, int, str]:
+        """
+        Validate that a given pressure produces a proper U-curve for NT optimization.
+
+        A valid U-curve requires:
+        1. At least MIN_CONSECUTIVE_FEASIBLE consecutive feasible NT points
+        2. The optimal NT has neighbors with higher TAC (proper minimum, not edge)
+
+        Parameters
+        ----------
+        pressure : float
+            The pressure to validate
+        fixed_feed : int
+            The feed stage to use for validation
+
+        Returns
+        -------
+        tuple : (is_valid, consecutive_feasible_count, reason)
+            - is_valid: True if pressure produces valid U-curve
+            - consecutive_feasible_count: Number of consecutive feasible points found
+            - reason: Explanation if invalid
+        """
+        nt_min, nt_max = self.nt_bounds
+        nt_values = list(range(nt_min, nt_max + 1, self.nt_step))
+
+        hard_feasible_points = []
+        soft_feasible_points = []
+        best_hard_nt = None
+        best_hard_tac = float('inf')
+        best_soft_nt = None
+        best_soft_tac = float('inf')
+
+        # Quick sweep to check feasibility
+        for nt in nt_values:
+            adjusted_feed = self._adjust_feed_for_nt(fixed_feed, nt)
+            if adjusted_feed < self.min_section_stages + 1:
+                continue
+
+            # Use cache if available, otherwise do quick eval
+            key = (nt, adjusted_feed, round(pressure, 4))
+            if key in self.cache:
+                point = self.cache[key]
+            else:
+                # Skip full evaluation - just record as unknown
+                continue
+
+            if point.feasibility == FeasibilityStatus.FEASIBLE:
+                hard_feasible_points.append((nt, point.tac))
+                if point.tac < best_hard_tac:
+                    best_hard_tac = point.tac
+                    best_hard_nt = nt
+            elif point.feasibility == FeasibilityStatus.SOFT_FEASIBLE:
+                soft_feasible_points.append((nt, point.tac))
+                if point.tac < best_soft_tac:
+                    best_soft_tac = point.tac
+                    best_soft_nt = nt
+
+        # For U-curve validation, primarily use HARD FEASIBLE points
+        # This ensures the U-curve is based on naturally converged points
+        feasible_points = hard_feasible_points
+        best_nt = best_hard_nt
+        best_tac = best_hard_tac
+
+        # Check 1: Minimum consecutive feasible points (prefer hard feasible)
+        if len(hard_feasible_points) < MIN_CONSECUTIVE_FEASIBLE:
+            # Check if including soft feasible would help
+            all_feasible = hard_feasible_points + soft_feasible_points
+            if len(all_feasible) >= MIN_CONSECUTIVE_FEASIBLE:
+                logger.warning(f"  U-curve validation: Only {len(hard_feasible_points)} hard feasible points, "
+                              f"but {len(all_feasible)} total (including {len(soft_feasible_points)} soft feasible)")
+                logger.warning(f"  WARNING: U-curve contains RR-recovered points - may not be reliable")
+                # Use all feasible points for validation, but this is a warning sign
+                feasible_points = all_feasible
+                if best_hard_nt is None:
+                    best_nt = best_soft_nt
+                    best_tac = best_soft_tac
+            else:
+                return (False, len(hard_feasible_points),
+                        f"Only {len(hard_feasible_points)} hard feasible points (need {MIN_CONSECUTIVE_FEASIBLE})")
+
+        # Check consecutive feasible points
+        consecutive_count = 1
+        max_consecutive = 1
+        feasible_nts = sorted([p[0] for p in feasible_points])
+
+        for i in range(1, len(feasible_nts)):
+            if feasible_nts[i] - feasible_nts[i-1] == self.nt_step:
+                consecutive_count += 1
+                max_consecutive = max(max_consecutive, consecutive_count)
+            else:
+                consecutive_count = 1
+
+        if max_consecutive < MIN_CONSECUTIVE_FEASIBLE:
+            return (False, max_consecutive,
+                    f"Only {max_consecutive} consecutive feasible points (need {MIN_CONSECUTIVE_FEASIBLE})")
+
+        # Check 2: Best NT should have BOTH neighbors with higher TAC (proper U minimum)
+        if U_CURVE_NEIGHBOR_CHECK and best_nt is not None:
+            tac_by_nt = {nt: tac for nt, tac in feasible_points}
+            lower_nt = best_nt - self.nt_step
+            upper_nt = best_nt + self.nt_step
+
+            lower_exists = lower_nt in tac_by_nt
+            upper_exists = upper_nt in tac_by_nt
+
+            # STRICT: Require BOTH neighbors to exist for a proper U-curve minimum
+            # A boundary minimum (only one neighbor) is not reliable
+            if not lower_exists or not upper_exists:
+                missing = []
+                if not lower_exists:
+                    missing.append(f"NT={lower_nt} (lower)")
+                if not upper_exists:
+                    missing.append(f"NT={upper_nt} (upper)")
+                return (False, max_consecutive,
+                        f"Optimal NT={best_nt} missing neighbors: {', '.join(missing)} - boundary minimum")
+
+            # Both neighbors must have higher TAC (true U-curve minimum)
+            lower_tac = tac_by_nt[lower_nt]
+            upper_tac = tac_by_nt[upper_nt]
+            lower_higher = lower_tac > best_tac
+            upper_higher = upper_tac > best_tac
+
+            if not lower_higher and not upper_higher:
+                return (False, max_consecutive,
+                        f"NT={best_nt} is not at minimum (both neighbors have lower TAC)")
+
+            if not lower_higher:
+                return (False, max_consecutive,
+                        f"NT={best_nt} not at minimum: NT={lower_nt} has TAC=${lower_tac:,.0f} <= ${best_tac:,.0f}")
+
+            if not upper_higher:
+                return (False, max_consecutive,
+                        f"NT={best_nt} not at minimum: NT={upper_nt} has TAC=${upper_tac:,.0f} <= ${best_tac:,.0f}")
+
+            # Check 3: TAC jump to neighbors shouldn't be abnormally large (>100% is suspicious)
+            # This catches edge cases where the "minimum" is actually a boundary artifact
+            lower_ratio = lower_tac / best_tac if best_tac > 0 else float('inf')
+            upper_ratio = upper_tac / best_tac if best_tac > 0 else float('inf')
+
+            MAX_TAC_RATIO = 2.0  # Neighbor TAC shouldn't be more than 2x the minimum
+            if lower_ratio > MAX_TAC_RATIO or upper_ratio > MAX_TAC_RATIO:
+                return (False, max_consecutive,
+                        f"Abnormal TAC jump at NT={best_nt}: ratios={lower_ratio:.1f}x/{upper_ratio:.1f}x (max {MAX_TAC_RATIO}x)")
+
+        return (True, max_consecutive, "Valid U-curve")
+
+    def _select_pressure_with_validation(self, pressure_sweep: 'SweepResult',
+                                          fixed_nt: int, fixed_feed: int) -> Tuple[float, float]:
+        """
+        Select the best pressure that produces a valid U-curve.
+
+        Falls back to lower pressures if the lowest-TAC pressure has edge-case behavior.
+
+        Parameters
+        ----------
+        pressure_sweep : SweepResult
+            Results from pressure sweep
+        fixed_nt : int
+            Current NT value
+        fixed_feed : int
+            Current feed value
+
+        Returns
+        -------
+        tuple : (selected_pressure, selected_tac)
+        """
+        # Sort pressures by TAC (best first) - prefer HARD FEASIBLE, fallback to SOFT FEASIBLE
+        hard_feasible_pressures = [
+            (p.pressure, p.tac)
+            for p in pressure_sweep.points
+            if p.feasibility == FeasibilityStatus.FEASIBLE
+        ]
+        soft_feasible_pressures = [
+            (p.pressure, p.tac)
+            for p in pressure_sweep.points
+            if p.feasibility == FeasibilityStatus.SOFT_FEASIBLE
+        ]
+
+        if hard_feasible_pressures:
+            hard_feasible_pressures.sort(key=lambda x: x[1])  # Sort by TAC
+            best_pressure = hard_feasible_pressures[0][0]
+            best_tac = hard_feasible_pressures[0][1]
+            logger.info(f"  Selected HARD FEASIBLE: P={best_pressure:.4f} bar with TAC=${best_tac:,.0f}")
+        elif soft_feasible_pressures:
+            soft_feasible_pressures.sort(key=lambda x: x[1])  # Sort by TAC
+            best_pressure = soft_feasible_pressures[0][0]
+            best_tac = soft_feasible_pressures[0][1]
+            logger.warning(f"  Selected SOFT FEASIBLE (no hard feasible available): P={best_pressure:.4f} bar with TAC=${best_tac:,.0f}")
+        else:
+            return (self.pressure_bounds[0], float('inf'))
+
+        return (best_pressure, best_tac)
 
     # ════════════════════════════════════════════════════════════════════════
     # EVALUATION WITH FEASIBILITY CHECK
     # ════════════════════════════════════════════════════════════════════════
 
-    def _evaluate_with_feasibility(self, nt: int, feed: int, pressure: float) -> EvaluationPoint:
+    def _evaluate_with_feasibility(self, nt: int, feed: int, pressure: float, rr_hint: float = None) -> EvaluationPoint:
         """
         Evaluate a configuration and check feasibility constraints.
 
@@ -681,7 +1090,31 @@ class ISOOptimizer:
         
         # Evaluate using existing evaluator (with diagnostic on failure)
         self.eval_count += 1
-        result = self.evaluator.evaluate(nt, feed, pressure, run_diagnostic_on_fail=True, rr_sweep_on_fail=True, purity_spec=self.purity_spec)
+        result = self.evaluator.evaluate(nt, feed, pressure, run_diagnostic_on_fail=True, rr_sweep_on_fail=True, purity_spec=self.purity_spec, rr_hint=rr_hint)
+
+        # Handle None result from evaluator (simulation/recovery failure)
+        if result is None:
+            logger.warning(f"  Evaluator returned None for NT={nt}, NF={feed}, P={pressure:.4f}")
+            point = EvaluationPoint(
+                nt=nt,
+                feed=feed,
+                pressure=pressure,
+                tac=float('inf'),
+                tpc=0,
+                toc=0,
+                q_reb=0,
+                q_cond=0,
+                diameter=0,
+                T_reb=0,
+                T_cond=0,
+                converged=False,
+            )
+            point.feasibility = FeasibilityStatus.INFEASIBLE_CONVERGENCE
+            point.infeasibility_reason = "Evaluator returned None (simulation failure)"
+            self.infeasible_count += 1
+            self.cache[key] = point
+            self.all_evaluations.append(point)
+            return point
 
         # Collect RR sweep data from failed evaluations (for infeasible design visualization)
         if result.get('rr_sweep'):
@@ -723,6 +1156,9 @@ class ISOOptimizer:
             converged=converged,
         )
 
+        # Store reflux ratio from Aspen output (for warm-starting)
+        point.reflux_ratio = result.get('reflux_ratio')
+
         # ════════════════════════════════════════════════════════════════════
         # FEASIBILITY CHECKS (Professor's requirements)
         # ════════════════════════════════════════════════════════════════════
@@ -756,9 +1192,18 @@ class ISOOptimizer:
             self.infeasible_count += 1
 
         else:
-            point.feasibility = FeasibilityStatus.FEASIBLE
-            self.feasible_count += 1
-            logger.info(f"  [OK] FEASIBLE: TAC=${tac:,.0f}, T_reb={T_reb:.1f}C (P={pressure:.4f})")
+            # Check if this was an RR-recovered point (soft feasible)
+            is_rr_recovered = result.get('recovered_from_rr_sweep', False)
+
+            if is_rr_recovered:
+                point.feasibility = FeasibilityStatus.SOFT_FEASIBLE
+                self.soft_feasible_count += 1
+                recovery_rr = result.get('recovery_rr', 0)
+                logger.info(f"  [~] SOFT FEASIBLE (RR-recovered): TAC=${tac:,.0f}, T_reb={T_reb:.1f}C, RR={recovery_rr:.2f} (P={pressure:.4f})")
+            else:
+                point.feasibility = FeasibilityStatus.FEASIBLE
+                self.feasible_count += 1
+                logger.info(f"  [OK] FEASIBLE: TAC=${tac:,.0f}, T_reb={T_reb:.1f}C (P={pressure:.4f})")
         
         # Cache and store
         self.cache[key] = point
@@ -900,11 +1345,56 @@ class ISOOptimizer:
             },
             'iterations': len(self.iterations),
         }
-    
+
+    def _build_baseline_section(self) -> Dict:
+        """Build baseline section for result JSON."""
+        if self.baseline_result is None:
+            return {
+                'recorded': False,
+                'reason': 'No baseline evaluation performed',
+            }
+
+        initial = self.config.get('initial', {})
+        return {
+            'recorded': True,
+            'nt': initial.get('nt'),
+            'feed': initial.get('feed'),
+            'pressure': initial.get('pressure'),
+            'tac': self.baseline_tac,
+            'converged': self.baseline_result.converged,
+            'feasibility': self.baseline_result.feasibility.value,
+            'T_reb': self.baseline_result.T_reb if hasattr(self.baseline_result, 'T_reb') else None,
+        }
+
+    def _build_improvement_section(self) -> Dict:
+        """Build improvement metrics section for result JSON."""
+        if self.baseline_tac is None or self.baseline_tac <= 0:
+            return {
+                'baseline_available': False,
+                'reason': 'Baseline TAC not available (did not converge or infeasible)',
+            }
+
+        optimized_tac = self.result.optimal_tac
+        absolute_savings = self.baseline_tac - optimized_tac
+        relative_improvement = (absolute_savings / self.baseline_tac) * 100
+
+        return {
+            'baseline_available': True,
+            'baseline_tac': round(self.baseline_tac, 2),
+            'optimized_tac': round(optimized_tac, 2),
+            'absolute_savings_per_year': round(absolute_savings, 2),
+            'relative_improvement_percent': round(relative_improvement, 2),
+            'summary': f"${absolute_savings:,.0f}/year savings ({relative_improvement:.1f}% reduction)",
+        }
+
     def save_results(self, output_dir: str = "results") -> str:
         """Save all results to JSON file."""
         os.makedirs(output_dir, exist_ok=True)
-        
+
+        # Build baseline section
+        baseline_section = self._build_baseline_section()
+        improvement_section = self._build_improvement_section()
+
         # Build output dictionary
         output = {
             'metadata': {
@@ -913,12 +1403,14 @@ class ISOOptimizer:
                 'temperature_constraint': f'T_reb <= {self.T_reb_max}C',
                 'convergence_tolerance': self.tac_tolerance,
             },
+            'baseline': baseline_section,
             'optimal': {
                 'nt': self.result.optimal_nt,
                 'feed': self.result.optimal_feed,
                 'pressure': self.result.optimal_pressure,
                 'tac': self.result.optimal_tac,
             },
+            'improvement': improvement_section,
             'convergence': {
                 'converged': self.result.converged,
                 'iterations': self.result.convergence_iteration,

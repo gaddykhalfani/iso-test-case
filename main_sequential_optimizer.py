@@ -140,7 +140,8 @@ def run_nt_feed_sweep(evaluator, optimal_pressure: float,
         
     Returns
     -------
-    List[Dict] : List of sweep results with keys: nt, feed, tac, pressure
+    List[Dict] : List of sweep results with keys: nt, feed, tac, pressure,
+                 T_reb, converged, feasibility ('feasible', 'soft_feasible', 'infeasible')
     """
     # Calculate focused ranges around optimal
     if optimal_nt is not None:
@@ -242,15 +243,23 @@ def run_nt_feed_sweep(evaluator, optimal_pressure: float,
                 tac = result.get('TAC', 1e12)
                 converged = result.get('converged', False)
                 T_reb = result.get('T_reb', 0)
-                
+                is_rr_recovered = result.get('recovered_from_rr_sweep', False)
+
+                # Determine feasibility status
                 if converged and tac < 1e10:
+                    if is_rr_recovered:
+                        feasibility = 'soft_feasible'  # RR-recovered point
+                    else:
+                        feasibility = 'feasible'  # Hard feasible - naturally converged
+
                     results.append({
                         'nt': nt,
                         'feed': feed,
                         'pressure': optimal_pressure,
                         'tac': tac,
                         'T_reb': T_reb if T_reb else 0,
-                        'converged': True
+                        'converged': True,
+                        'feasibility': feasibility
                     })
                     feasible_points += 1
                 else:
@@ -260,7 +269,8 @@ def run_nt_feed_sweep(evaluator, optimal_pressure: float,
                         'pressure': optimal_pressure,
                         'tac': 1e12,
                         'T_reb': T_reb if T_reb else 0,
-                        'converged': False
+                        'converged': False,
+                        'feasibility': 'infeasible'
                     })
                     
             except Exception as e:
@@ -271,7 +281,8 @@ def run_nt_feed_sweep(evaluator, optimal_pressure: float,
                     'pressure': optimal_pressure,
                     'tac': 1e12,
                     'T_reb': 0,
-                    'converged': False
+                    'converged': False,
+                    'feasibility': 'infeasible'
                 })
     
     elapsed = time.time() - start_time
@@ -399,7 +410,20 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
     
     logger.info("Connected successfully!")
     aspen.get_column_info(config['column']['block_name'])
-    
+
+    # Column diagnostic available via: aspen.diagnose_column_config(block_name)
+    # Disabled for normal runs — enable when debugging column spec issues
+
+    # Auto-detect purity target from Aspen Design Specs
+    if purity_spec:
+        auto_target = aspen.auto_detect_purity_target(config['column']['block_name'])
+        if auto_target and auto_target.get('target') is not None:
+            if purity_spec.get('target') != auto_target['target']:
+                logger.warning("  Config purity target ({}) != Aspen Design Spec target ({})".format(
+                    purity_spec.get('target'), auto_target['target']))
+                logger.info("  Auto-updating purity target to {}".format(auto_target['target']))
+            purity_spec['target'] = auto_target['target']
+
     # ─────────────────────────────────────────────────────────────────────────
     # SETUP TAC CALCULATOR AND EVALUATOR
     # ─────────────────────────────────────────────────────────────────────────

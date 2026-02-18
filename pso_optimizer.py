@@ -166,6 +166,10 @@ class PSOOptimizer:
         # RR sweep data from failed evaluations (for infeasible design visualization)
         self.failed_rr_sweeps = []
 
+        # Baseline TAC recording (for improvement metrics)
+        self.baseline_result = None
+        self.baseline_tac = None
+
         # Set random seed
         if self.pso_config.seed is not None:
             np.random.seed(self.pso_config.seed)
@@ -234,6 +238,40 @@ class PSOOptimizer:
         early_stopping_patience = 15  # Stop if no improvement for 15 iterations
         no_improvement_count = 0
         prev_best_fitness = float('inf')
+
+        # ════════════════════════════════════════════════════════════════════
+        # BASELINE TAC EVALUATION
+        # ════════════════════════════════════════════════════════════════════
+
+        initial = self.config.get('initial', {})
+        initial_nt = initial.get('nt', (self.nt_bounds[0] + self.nt_bounds[1]) // 2)
+        initial_feed = initial.get('feed', initial_nt // 2)
+        initial_pressure = initial.get('pressure', (self.pressure_bounds[0] + self.pressure_bounds[1]) / 2)
+
+        logger.info("")
+        logger.info("=" * 50)
+        logger.info("EVALUATING BASELINE TAC (Initial Configuration)")
+        logger.info("=" * 50)
+        logger.info(f"  NT={initial_nt}, Feed={initial_feed}, P={initial_pressure:.4f} bar")
+
+        _emit_progress(0, "baseline_evaluation", message="Evaluating baseline TAC")
+
+        baseline_fitness, baseline_eval_result = self._evaluate_fitness(
+            initial_nt, initial_feed, initial_pressure
+        )
+
+        if baseline_fitness < 1e10 and baseline_eval_result:
+            self.baseline_tac = baseline_fitness
+            self.baseline_result = baseline_eval_result
+            logger.info(f"  BASELINE TAC: ${self.baseline_tac:,.0f}/year")
+        else:
+            self.baseline_tac = None
+            self.baseline_result = baseline_eval_result
+            logger.warning("  Baseline did not converge or is infeasible")
+            logger.info("  Proceeding without baseline comparison")
+
+        logger.info("=" * 50)
+        logger.info("")
 
         # ════════════════════════════════════════════════════════════════════
         # MAIN PSO LOOP
@@ -390,12 +428,18 @@ class PSOOptimizer:
         """
         Evaluate fitness with constraint handling.
 
-        Uses penalty method for temperature constraint.
+        Uses penalty method for temperature constraint AND boundary penalties
+        to prevent convergence at NT/feed boundaries.
         """
         self.eval_count += 1
 
         # Evaluate (with diagnostic on failure)
         result = self.evaluator.evaluate(nt, feed, pressure, run_diagnostic_on_fail=True, rr_sweep_on_fail=True, purity_spec=self.purity_spec)
+
+        # Handle None result from evaluator
+        if result is None:
+            logger.warning(f"  Evaluator returned None for NT={nt}, NF={feed}, P={pressure:.4f}")
+            result = {'TAC': float('inf'), 'T_reb': None, 'converged': False}
 
         tac = result.get('TAC', float('inf'))
         T_reb = result.get('T_reb')
@@ -429,6 +473,38 @@ class PSOOptimizer:
         else:
             self.feasible_count += 1
 
+            # ════════════════════════════════════════════════════════════════
+            # BOUNDARY PENALTY - Discourage solutions at NT/feed boundaries
+            # This prevents the optimizer from getting stuck at boundary values
+            # ════════════════════════════════════════════════════════════════
+
+            # Penalty for NT too close to lower bound
+            nt_margin = nt - self.nt_bounds[0]
+            if nt_margin < 5:  # Within 5 stages of lower bound
+                boundary_penalty = 5000 * (5 - nt_margin) ** 2
+                penalty += boundary_penalty
+                logger.debug(f"  NT boundary penalty: ${boundary_penalty:.0f} (NT={nt}, margin={nt_margin})")
+
+            # Penalty for feed being constrained by NT (tight feed range)
+            # Valid feed range: [min_section_stages+1, nt-min_section_stages]
+            valid_feed_range = nt - 2 * self.min_section_stages
+            if valid_feed_range < 10:  # Feed range is too narrow
+                range_penalty = 3000 * (10 - valid_feed_range) ** 2
+                penalty += range_penalty
+                logger.debug(f"  Feed range penalty: ${range_penalty:.0f} (NT={nt}, range={valid_feed_range})")
+
+            # Penalty if feed is at its constrained boundary
+            max_valid_feed = nt - self.min_section_stages
+            min_valid_feed = self.min_section_stages + 1
+            if feed >= max_valid_feed - 1:  # Feed at or near upper constraint
+                feed_boundary_penalty = 2000 * (1 + max_valid_feed - feed) ** 2
+                penalty += feed_boundary_penalty
+                logger.debug(f"  Feed upper boundary penalty: ${feed_boundary_penalty:.0f}")
+            elif feed <= min_valid_feed + 1:  # Feed at or near lower constraint
+                feed_boundary_penalty = 2000 * (1 + feed - min_valid_feed) ** 2
+                penalty += feed_boundary_penalty
+                logger.debug(f"  Feed lower boundary penalty: ${feed_boundary_penalty:.0f}")
+
         fitness = tac + penalty
 
         return fitness, result
@@ -459,6 +535,45 @@ class PSOOptimizer:
         logger.info(f"  Infeasible: {result.infeasible_evaluations}")
         logger.info("=" * 70)
 
+    def _build_baseline_section(self) -> dict:
+        """Build baseline section for result JSON."""
+        if self.baseline_result is None:
+            return {
+                'recorded': False,
+                'reason': 'No baseline evaluation performed',
+            }
+
+        initial = self.config.get('initial', {})
+        return {
+            'recorded': True,
+            'nt': initial.get('nt'),
+            'feed': initial.get('feed'),
+            'pressure': initial.get('pressure'),
+            'tac': self.baseline_tac,
+            'converged': self.baseline_tac is not None,
+        }
+
+    def _build_improvement_section(self) -> dict:
+        """Build improvement metrics section for result JSON."""
+        if self.baseline_tac is None or self.baseline_tac <= 0:
+            return {
+                'baseline_available': False,
+                'reason': 'Baseline TAC not available (did not converge or infeasible)',
+            }
+
+        optimized_tac = self.result.optimal_tac
+        absolute_savings = self.baseline_tac - optimized_tac
+        relative_improvement = (absolute_savings / self.baseline_tac) * 100
+
+        return {
+            'baseline_available': True,
+            'baseline_tac': round(self.baseline_tac, 2),
+            'optimized_tac': round(optimized_tac, 2),
+            'absolute_savings_per_year': round(absolute_savings, 2),
+            'relative_improvement_percent': round(relative_improvement, 2),
+            'summary': f"${absolute_savings:,.0f}/year savings ({relative_improvement:.1f}% reduction)",
+        }
+
     def save_results(self, output_dir: str = "results") -> str:
         """Save results to JSON file."""
         os.makedirs(output_dir, exist_ok=True)
@@ -468,6 +583,10 @@ class PSOOptimizer:
 
         result = self.result
 
+        # Build baseline and improvement sections
+        baseline_section = self._build_baseline_section()
+        improvement_section = self._build_improvement_section()
+
         output = {
             'metadata': {
                 'methodology': 'Particle Swarm Optimization (PSO)',
@@ -476,6 +595,7 @@ class PSOOptimizer:
                 'n_particles': result.n_particles,
                 'n_iterations': result.n_iterations,
             },
+            'baseline': baseline_section,
             'optimal': {
                 'nt': result.optimal_nt,
                 'feed': result.optimal_feed,
@@ -485,6 +605,7 @@ class PSOOptimizer:
                 'tpc': result.optimal_tpc,
                 'toc': result.optimal_toc,
             },
+            'improvement': improvement_section,
             'convergence': {
                 'history': result.convergence_history,
                 'best_positions': result.best_positions_history,
@@ -645,6 +766,16 @@ def main():
     except ImportError:
         purity_spec = None
         logger.warning("Could not import get_purity_spec from config")
+
+    # Auto-detect purity target from Aspen Design Specs
+    if purity_spec and not args.demo and aspen:
+        auto_target = aspen.auto_detect_purity_target(config['column']['block_name'])
+        if auto_target and auto_target.get('target') is not None:
+            if purity_spec.get('target') != auto_target['target']:
+                logger.warning("  Config purity target ({}) != Aspen Design Spec target ({})".format(
+                    purity_spec.get('target'), auto_target['target']))
+                logger.info("  Auto-updating purity target to {}".format(auto_target['target']))
+            purity_spec['target'] = auto_target['target']
 
     # Track aspen for cleanup
     aspen_instance = None

@@ -66,13 +66,14 @@ class ISOVisualizer:
         
         # Colors
         self.colors = {
-            'feasible': '#1f77b4',      # Blue
+            'feasible': '#1f77b4',      # Blue - hard feasible (naturally converged)
+            'soft_feasible': '#ff7f0e', # Orange - soft feasible (RR-recovered)
             'infeasible_temp': '#d62728',  # Red
             'infeasible_conv': '#7f7f7f',  # Gray
             'optimal': '#2ca02c',       # Green
             'pressure': '#9467bd',      # Purple
             'nt': '#17becf',            # Cyan
-            'feed': '#ff7f0e',          # Orange
+            'feed': '#e377c2',          # Pink (changed from orange to avoid conflict)
         }
     
     def _get_smart_ylim(self, tac_values: List[float]) -> tuple:
@@ -118,7 +119,7 @@ class ISOVisualizer:
             if hasattr(feasibility, 'value'):
                 feasibility = feasibility.value
             
-            if feasibility == 'feasible' and tac < 1e10:
+            if feasibility in ('feasible', 'soft_feasible') and tac < 1e10:
                 p_feasible.append(p)
                 tac_feasible.append(tac / 1000)
             elif 'temperature' in str(feasibility):
@@ -135,12 +136,13 @@ class ISOVisualizer:
                     color=self.colors['feasible'], linewidth=2, markersize=8,
                     label='Feasible')
         
-        if p_infeasible:
-            ax1.scatter(p_infeasible, [max(tac_feasible) * 1.1] * len(p_infeasible),
+        if p_infeasible and tac_feasible:
+            y_pos = max(tac_feasible) * 1.1
+            ax1.scatter(p_infeasible, [y_pos] * len(p_infeasible),
                        marker='^', color=self.colors['infeasible_temp'], s=100,
                        label=f'Infeasible (T_reb > {T_REBOILER_MAX}°C)', zorder=5)
             for p, T in zip(p_infeasible, T_infeasible):
-                ax1.annotate(f'{T:.0f}°C', (p, max(tac_feasible) * 1.1),
+                ax1.annotate(f'{T:.0f}°C', (p, y_pos),
                            textcoords="offset points", xytext=(0, 10),
                            ha='center', fontsize=9, color='red')
         
@@ -207,78 +209,104 @@ class ISOVisualizer:
     # ════════════════════════════════════════════════════════════════════════
     
     def plot_nt_ucurve(self, optimizer, case_name: str, iteration: int = -1) -> str:
-        """Plot U-curve for NT optimization."""
+        """Plot U-curve for NT optimization with soft/hard feasible distinction."""
         if not optimizer.iterations:
             return None
-        
+
         iter_result = optimizer.iterations[iteration]
         points = iter_result.nt_sweep.points
-        
+
         if not points:
             return None
-        
-        nts, tacs = [], []
+
+        # Collect all points with feasibility flag: (nt, tac, is_soft)
+        all_data = []
+
         for pt in points:
             nt = safe_get(pt, 'nt')
             tac = safe_get(pt, 'tac', 1e12)
             feasibility = safe_get(pt, 'feasibility', FeasibilityStatus.FEASIBLE)
-            
+
             if hasattr(feasibility, 'value'):
                 feasibility = feasibility.value
-            
-            if feasibility == 'feasible' and tac < 1e10:
-                nts.append(nt)
-                tacs.append(tac / 1000)
-        
-        if not nts:
+
+            if tac < 1e10:
+                is_soft = (feasibility == 'soft_feasible')
+                all_data.append((nt, tac / 1000, is_soft))
+
+        if not all_data:
             return None
-        
-        data = sorted(zip(nts, tacs))
-        nts, tacs = zip(*data)
-        
+
+        # Sort by NT for continuous line
+        all_data.sort(key=lambda x: x[0])
+
+        all_nts = [d[0] for d in all_data]
+        all_tacs = [d[1] for d in all_data]
+        is_soft = [d[2] for d in all_data]
+        has_soft = any(is_soft)
+
         fig, ax = plt.subplots(figsize=(12, 7))
-        
-        ax.plot(nts, tacs, 'o-', color=self.colors['nt'], linewidth=2.5, markersize=8,
-               label='TAC vs NT')
-        
+
+        # Plot continuous line
+        ax.plot(all_nts, all_tacs, '-', color=self.colors['feasible'],
+               linewidth=2.5, zorder=5)
+
+        # Plot markers: filled for hard, hollow for soft
+        hard_nts = [all_nts[j] for j in range(len(all_nts)) if not is_soft[j]]
+        hard_tacs = [all_tacs[j] for j in range(len(all_tacs)) if not is_soft[j]]
+        soft_nts = [all_nts[j] for j in range(len(all_nts)) if is_soft[j]]
+        soft_tacs = [all_tacs[j] for j in range(len(all_tacs)) if is_soft[j]]
+
+        if hard_nts:
+            ax.scatter(hard_nts, hard_tacs, color=self.colors['feasible'], s=64,
+                      marker='o', zorder=6, edgecolors='white', linewidths=0.5,
+                      label='Hard Feasible (naturally converged)')
+
+        if soft_nts:
+            ax.scatter(soft_nts, soft_tacs, color=self.colors['soft_feasible'], s=64,
+                      marker='o', facecolors='white', edgecolors=self.colors['soft_feasible'],
+                      linewidths=2, zorder=6, label='Soft Feasible (RR-recovered)')
+
         opt_nt = iter_result.optimal_nt
         opt_tac = iter_result.optimal_tac / 1000
-        
+
         ax.plot(opt_nt, opt_tac, '*', color=self.colors['optimal'], markersize=25,
                markeredgecolor='black', markeredgewidth=1.5,
                label=f'Optimal NT = {opt_nt}', zorder=10)
         ax.axvline(x=opt_nt, color='red', linestyle='--', linewidth=1.5, alpha=0.7)
-        
-        if len(nts) > 5:
+
+        if len(all_nts) > 5:
             ax.annotate('↑ Energy Cost\n(High reflux)',
-                       xy=(min(nts) + 2, tacs[0] * 0.95),
+                       xy=(min(all_nts) + 2, max(all_tacs) * 0.95),
                        fontsize=10, style='italic',
                        bbox=dict(boxstyle='round', facecolor='mistyrose', alpha=0.8))
             ax.annotate('↑ Capital Cost\n(Tall column)',
-                       xy=(max(nts) - 5, tacs[-1] * 0.95),
+                       xy=(max(all_nts) - 5, min(all_tacs) * 1.05),
                        fontsize=10, style='italic',
                        bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
-        
-        y_min, y_max = self._get_smart_ylim(list(tacs))
+
+        y_min, y_max = self._get_smart_ylim(all_tacs)
         ax.set_ylim(y_min, y_max)
-        
+
         ax.set_xlabel('Number of Stages (NT)', fontsize=12)
         ax.set_ylabel('TAC (×$1,000/year)', fontsize=12)
-        
+
         fixed = iter_result.nt_sweep.fixed_values
-        ax.set_title(f'{case_name} - ISO Step 2: NT Optimization (U-Curve)\n'
-                    f'P = {fixed["pressure"]:.4f} bar, NF = {fixed["feed"]} fixed',
-                    fontsize=14, fontweight='bold')
-        
+        title = f'{case_name} - ISO Step 2: NT Optimization (U-Curve)\n'
+        title += f'P = {fixed["pressure"]:.4f} bar, NF = {fixed["feed"]} fixed'
+        if has_soft:
+            title += '\n(● = natural convergence, ○ = RR-recovered)'
+        ax.set_title(title, fontsize=14, fontweight='bold')
+
         ax.legend(loc='upper right', fontsize=10)
         ax.grid(True, alpha=0.3)
-        
+
         plt.tight_layout()
-        
+
         filepath = os.path.join(self.output_dir, f"{case_name}_ISO_NT_UCurve.png")
         plt.savefig(filepath, dpi=300, bbox_inches='tight')
         plt.close()
-        
+
         logger.info(f"  Saved: {filepath}")
         return filepath
     
@@ -287,68 +315,94 @@ class ISOVisualizer:
     # ════════════════════════════════════════════════════════════════════════
     
     def plot_feed_ucurve(self, optimizer, case_name: str, iteration: int = -1) -> str:
-        """Plot U-curve for feed optimization."""
+        """Plot U-curve for feed optimization with soft/hard feasible distinction."""
         if not optimizer.iterations:
             return None
-        
+
         iter_result = optimizer.iterations[iteration]
         points = iter_result.feed_sweep.points
-        
+
         if not points:
             return None
-        
-        feeds, tacs = [], []
+
+        # Collect all points with feasibility flag: (feed, tac, is_soft)
+        all_data = []
+
         for pt in points:
             feed = safe_get(pt, 'feed')
             tac = safe_get(pt, 'tac', 1e12)
             feasibility = safe_get(pt, 'feasibility', FeasibilityStatus.FEASIBLE)
-            
+
             if hasattr(feasibility, 'value'):
                 feasibility = feasibility.value
-            
-            if feasibility == 'feasible' and tac < 1e10:
-                feeds.append(feed)
-                tacs.append(tac / 1000)
-        
-        if not feeds:
+
+            if tac < 1e10:
+                is_soft = (feasibility == 'soft_feasible')
+                all_data.append((feed, tac / 1000, is_soft))
+
+        if not all_data:
             return None
-        
-        data = sorted(zip(feeds, tacs))
-        feeds, tacs = zip(*data)
-        
+
+        # Sort by feed for continuous line
+        all_data.sort(key=lambda x: x[0])
+
+        all_feeds = [d[0] for d in all_data]
+        all_tacs = [d[1] for d in all_data]
+        is_soft = [d[2] for d in all_data]
+        has_soft = any(is_soft)
+
         fig, ax = plt.subplots(figsize=(12, 7))
-        
-        ax.plot(feeds, tacs, 's-', color=self.colors['feed'], linewidth=2.5, markersize=8,
-               label='TAC vs Feed Stage')
-        
+
+        # Plot continuous line
+        ax.plot(all_feeds, all_tacs, '-', color=self.colors['feasible'],
+               linewidth=2.5, zorder=5)
+
+        # Plot markers: filled for hard, hollow for soft
+        hard_feeds = [all_feeds[j] for j in range(len(all_feeds)) if not is_soft[j]]
+        hard_tacs = [all_tacs[j] for j in range(len(all_tacs)) if not is_soft[j]]
+        soft_feeds = [all_feeds[j] for j in range(len(all_feeds)) if is_soft[j]]
+        soft_tacs = [all_tacs[j] for j in range(len(all_tacs)) if is_soft[j]]
+
+        if hard_feeds:
+            ax.scatter(hard_feeds, hard_tacs, color=self.colors['feasible'], s=64,
+                      marker='s', zorder=6, edgecolors='white', linewidths=0.5,
+                      label='Hard Feasible (naturally converged)')
+
+        if soft_feeds:
+            ax.scatter(soft_feeds, soft_tacs, color=self.colors['soft_feasible'], s=64,
+                      marker='s', facecolors='white', edgecolors=self.colors['soft_feasible'],
+                      linewidths=2, zorder=6, label='Soft Feasible (RR-recovered)')
+
         opt_feed = iter_result.optimal_feed
         opt_tac = iter_result.optimal_tac / 1000
-        
+
         ax.plot(opt_feed, opt_tac, '*', color=self.colors['optimal'], markersize=25,
                markeredgecolor='black', markeredgewidth=1.5,
                label=f'Optimal NF = {opt_feed}', zorder=10)
         ax.axvline(x=opt_feed, color='red', linestyle='--', linewidth=1.5, alpha=0.7)
-        
-        y_min, y_max = self._get_smart_ylim(list(tacs))
+
+        y_min, y_max = self._get_smart_ylim(all_tacs)
         ax.set_ylim(y_min, y_max)
-        
+
         ax.set_xlabel('Feed Stage (NF)', fontsize=12)
         ax.set_ylabel('TAC (×$1,000/year)', fontsize=12)
-        
+
         fixed = iter_result.feed_sweep.fixed_values
-        ax.set_title(f'{case_name} - ISO Step 3: Feed Optimization\n'
-                    f'P = {fixed["pressure"]:.4f} bar, NT = {fixed["nt"]} fixed',
-                    fontsize=14, fontweight='bold')
-        
+        title = f'{case_name} - ISO Step 3: Feed Optimization\n'
+        title += f'P = {fixed["pressure"]:.4f} bar, NT = {fixed["nt"]} fixed'
+        if has_soft:
+            title += '\n(■ = natural convergence, □ = RR-recovered)'
+        ax.set_title(title, fontsize=14, fontweight='bold')
+
         ax.legend(loc='upper right', fontsize=10)
         ax.grid(True, alpha=0.3)
-        
+
         plt.tight_layout()
-        
+
         filepath = os.path.join(self.output_dir, f"{case_name}_ISO_Feed_UCurve.png")
         plt.savefig(filepath, dpi=300, bbox_inches='tight')
         plt.close()
-        
+
         logger.info(f"  Saved: {filepath}")
         return filepath
     
@@ -422,15 +476,15 @@ class ISOVisualizer:
                               n_curves: int = 5,
                               selection_method: str = 'spread') -> str:
         """
-        Plot multiple U-curves at different feed stages.
-        
+        Plot multiple U-curves at different feed stages with soft/hard feasible distinction.
+
         This is the KEY VISUALIZATION showing how the TAC-NT trade-off
         varies with feed stage location.
-        
+
         Parameters
         ----------
         nt_feed_results : List
-            Results with 'nt', 'feed', 'tac' keys
+            Results with 'nt', 'feed', 'tac', 'feasibility' keys
         case_name : str
             Case identifier
         optimal : Dict
@@ -443,18 +497,34 @@ class ISOVisualizer:
         if not nt_feed_results:
             logger.warning("No NT/Feed results to plot multiple U-curves")
             return None
-        
-        # Group by feed stage
-        feed_groups = defaultdict(list)
+
+        # Group by feed stage, separating hard and soft feasible
+        hard_feed_groups = defaultdict(list)  # Hard feasible (naturally converged)
+        soft_feed_groups = defaultdict(list)  # Soft feasible (RR-recovered)
         all_tacs = []
-        
+
         for r in nt_feed_results:
             tac = safe_get(r, 'tac')
             nt = safe_get(r, 'nt')
             feed = safe_get(r, 'feed')
+            feasibility = safe_get(r, 'feasibility', 'feasible')
+
+            # Handle enum objects
+            if hasattr(feasibility, 'value'):
+                feasibility = feasibility.value
+
             if tac and tac < 1e10:
-                feed_groups[feed].append((nt, tac / 1000))
+                if feasibility == 'soft_feasible':
+                    soft_feed_groups[feed].append((nt, tac / 1000))
+                else:
+                    hard_feed_groups[feed].append((nt, tac / 1000))
                 all_tacs.append(tac / 1000)
+
+        # Combine all feeds for selection
+        all_feeds_set = set(hard_feed_groups.keys()) | set(soft_feed_groups.keys())
+        feed_groups = {}  # Combined for compatibility with rest of function
+        for feed in all_feeds_set:
+            feed_groups[feed] = hard_feed_groups.get(feed, []) + soft_feed_groups.get(feed, [])
         
         if not feed_groups:
             return None
@@ -492,42 +562,82 @@ class ISOVisualizer:
         colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(selected_feeds)))
         feed_optima = {}
         
+        has_soft_feasible = False  # Track if any soft feasible points exist
+
         for i, feed in enumerate(selected_feeds):
-            data = sorted(feed_groups[feed])
-            nts = [d[0] for d in data]
-            tacs = [d[1] for d in data]
-            
-            valid_idx = [j for j, t in enumerate(tacs) if t <= y_max * 1.2]
-            if len(valid_idx) < 3:
-                continue
-                
-            nts_plot = [nts[j] for j in valid_idx]
-            tacs_plot = [tacs[j] for j in valid_idx]
-            
             is_optimal_feed = (optimal_feed and feed == optimal_feed)
-            
+
+            # Get hard and soft feasible data for this feed
+            hard_data = sorted(hard_feed_groups.get(feed, []))
+            soft_data = sorted(soft_feed_groups.get(feed, []))
+
+            # ════════════════════════════════════════════════════════════════
+            # HARD FEASIBLE LINE + SOFT FEASIBLE MARKERS
+            # Line drawn through hard feasible only (reliable TAC values)
+            # Soft feasible shown as hollow markers (diagnostic reference)
+            # ════════════════════════════════════════════════════════════════
+
+            if soft_data:
+                has_soft_feasible = True
+
+            # Filter valid TAC values
+            hard_data_filtered = [(d[0], d[1]) for d in hard_data if d[1] <= y_max * 1.2]
+            soft_data_filtered = [(d[0], d[1]) for d in soft_data if d[1] <= y_max * 1.2]
+
+            if len(hard_data_filtered) < 2 and not soft_data_filtered:
+                continue
+
+            # Style based on whether this is optimal feed
             if is_optimal_feed:
-                linewidth, markersize, alpha, zorder = 3.5, 10, 1.0, 8
-                linestyle = '-'
+                linewidth, alpha, zorder = 3.5, 1.0, 8
                 label = f'NF = {feed} (OPTIMAL)'
             else:
-                linewidth, markersize, alpha, zorder = 2.0, 6, 0.7, 5
-                linestyle = '--'
+                linewidth, alpha, zorder = 2.0, 0.8, 5
                 label = f'NF = {feed}'
-            
-            ax.plot(nts_plot, tacs_plot, linestyle, color=colors[i], 
-                   linewidth=linewidth, markersize=markersize, marker='o',
-                   alpha=alpha, zorder=zorder, label=label)
-            
-            min_idx = np.argmin(tacs_plot)
-            feed_optima[feed] = (nts_plot[min_idx], tacs_plot[min_idx])
-            
-            if not is_optimal_feed:
-                ax.plot(nts_plot[min_idx], tacs_plot[min_idx], 'o', 
-                       color=colors[i], markersize=12, 
-                       markeredgecolor='white', markeredgewidth=2,
-                       alpha=0.9, zorder=6)
+
+            # Plot continuous line through HARD FEASIBLE only
+            hard_nts_line = [d[0] for d in hard_data_filtered]
+            hard_tacs_line = [d[1] for d in hard_data_filtered]
+            if len(hard_nts_line) >= 2:
+                ax.plot(hard_nts_line, hard_tacs_line, '-', color=colors[i],
+                       linewidth=linewidth, alpha=alpha, zorder=zorder, label=label)
+            elif hard_nts_line:
+                ax.plot(hard_nts_line, hard_tacs_line, 'o', color=colors[i],
+                       markersize=8, alpha=alpha, zorder=zorder, label=label)
+
+            # Hard feasible markers (filled circles)
+            if hard_nts_line:
+                markersize = 10 if is_optimal_feed else 6
+                ax.scatter(hard_nts_line, hard_tacs_line, color=colors[i], s=markersize**2,
+                          marker='o', zorder=zorder+1, edgecolors='white', linewidths=0.5)
+
+            # Soft feasible markers (hollow circles — not connected by line)
+            soft_nts_m = [d[0] for d in soft_data_filtered]
+            soft_tacs_m = [d[1] for d in soft_data_filtered]
+            if soft_nts_m:
+                markersize = 8 if is_optimal_feed else 5
+                ax.scatter(soft_nts_m, soft_tacs_m, color=colors[i], s=markersize**2,
+                          marker='o', facecolors='white', edgecolors=colors[i],
+                          linewidths=1.5, zorder=zorder+1)
+
+            # Find and mark the minimum (from hard feasible only)
+            if hard_nts_line:
+                hard_min_idx = np.argmin(hard_tacs_line)
+                feed_optima[feed] = (hard_nts_line[hard_min_idx], hard_tacs_line[hard_min_idx])
+
+                if not is_optimal_feed:
+                    ax.plot(hard_nts_line[hard_min_idx], hard_tacs_line[hard_min_idx], 'o',
+                           color=colors[i], markersize=12,
+                           markeredgecolor='white', markeredgewidth=2,
+                           alpha=0.9, zorder=zorder+2)
         
+        # Add legend entry for soft feasible markers (if any exist)
+        if has_soft_feasible:
+            ax.scatter([], [], color='gray', s=40, marker='o', facecolors='white',
+                      edgecolors='gray', linewidths=1.5, label='○ = Soft Feasible (RR-recovered)')
+            ax.scatter([], [], color='gray', s=40, marker='o',
+                      label='● = Hard Feasible (natural convergence)')
+
         if optimal:
             ax.plot(optimal['nt'], optimal['tac']/1000, '*', color='red',
                    markersize=25, markeredgecolor='black', markeredgewidth=2,
@@ -562,11 +672,17 @@ class ISOVisualizer:
         
         ax.set_xlabel('Number of Stages (NT)', fontsize=13, fontweight='bold')
         ax.set_ylabel('TAC (×$1,000/year)', fontsize=13, fontweight='bold')
-        ax.set_title(f'{case_name} - Multiple U-Curves: Effect of Feed Stage Location\n'
-                    f'(Each curve shows TAC vs NT at a different feed stage)',
-                    fontsize=14, fontweight='bold')
+
+        # Update title to include note about line styles if soft feasible exists
+        title = f'{case_name} - Multiple U-Curves: Effect of Feed Stage Location\n'
+        if has_soft_feasible:
+            title += '(Solid = naturally converged, Dashed = RR-recovered)'
+        else:
+            title += '(Each curve shows TAC vs NT at a different feed stage)'
+
+        ax.set_title(title, fontsize=14, fontweight='bold')
         ax.set_ylim(y_min, y_max)
-        ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), 
+        ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5),
                  fontsize=10, framealpha=0.95)
         ax.grid(True, alpha=0.3)
         plt.tight_layout()

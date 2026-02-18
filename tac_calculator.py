@@ -811,16 +811,23 @@ class TACCalculator:
         Fm = 1.7 if self.material == 'SS' else 0.0
         Fc = Fs + Ft + Fm
         
-        if pressure < 0.1:
-            Fp = 1.40
-        elif pressure < 0.3:
-            Fp = 1.25
-        elif pressure < 0.5:
-            Fp = 1.15
-        elif pressure < 1.0:
-            Fp = 1.05
+        # Guthrie pressure factor - smooth linear interpolation
+        # (Replaces step function to eliminate artificial cost discontinuities)
+        # Breakpoints: deep vacuum -> atmospheric
+        P_breaks = [0.0, 0.1, 0.3, 0.5, 1.0]
+        Fp_vals  = [1.40, 1.25, 1.15, 1.05, 1.00]
+
+        if pressure <= P_breaks[0]:
+            Fp = Fp_vals[0]
+        elif pressure >= P_breaks[-1]:
+            Fp = Fp_vals[-1]
         else:
-            Fp = 1.00
+            Fp = Fp_vals[-1]  # fallback
+            for i in range(len(P_breaks) - 1):
+                if pressure <= P_breaks[i + 1]:
+                    t = (pressure - P_breaks[i]) / (P_breaks[i + 1] - P_breaks[i])
+                    Fp = Fp_vals[i] + t * (Fp_vals[i + 1] - Fp_vals[i])
+                    break
         
         cost = (self.ms_index / self.ms_base) * 101.9 * \
                (D_ft ** 1.066) * (H_ft ** 0.82) * Fc * Fp

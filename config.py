@@ -39,45 +39,49 @@ COLUMN_TEMPLATES = {
         'block_name': 'COL2',
         'feed_stream': 'LIQPROD1',
         'description': 'EB/SM Separation',
-        'nt_bounds': (15, 80),
+        'nt_bounds': (20, 80),  # Increased from 15 to ensure meaningful feed range
         'feed_bounds': (10, 70),
         'pressure_bounds': (0.1, 1.0),
         'initial_nt': 25,
         'initial_feed': 15,
         'initial_pressure': 0.2,
+        'min_section_stages': 3,  # Minimum stages in rectifying/stripping section
     },
     'COL3': {
         'block_name': 'COL3',
         'feed_stream': 'LIQPROD2',
         'description': 'Benzene/Toluene Separation',
-        'nt_bounds': (15, 45),
+        'nt_bounds': (20, 45),  # Increased from 15
         'feed_bounds': (5, 30),
         'pressure_bounds': (0.1, 0.2),
         'initial_nt': 45,
         'initial_feed': 23,
         'initial_pressure': 0.2,
+        'min_section_stages': 3,
     },
     'COL4': {
         'block_name': 'COL4',
         'feed_stream': 'LIQPROD',
         'description': 'Light Ends Removal',
-        'nt_bounds': (15, 85),
+        'nt_bounds': (20, 85),  # Increased from 15
         'feed_bounds': (10, 80),
         'pressure_bounds': (0.01, 0.1),
         'initial_nt': 95,
         'initial_feed': 40,
         'initial_pressure': 0.1,
+        'min_section_stages': 3,
     },
     'COL5': {
         'block_name': 'COL5',
         'feed_stream': 'HEAVY1',
         'description': 'Heavy Ends Separation',
-        'nt_bounds': (15, 45),
+        'nt_bounds': (20, 45),  # Increased from 15
         'feed_bounds': (5, 40),
         'pressure_bounds': (0.5, 1.5),
         'initial_nt': 25,
         'initial_feed': 12,
         'initial_pressure': 1.0,
+        'min_section_stages': 3,
     },
 }
 
@@ -103,7 +107,7 @@ PURITY_SPECS = {
         'stream': 'STY',
         'component': 'STYRE-01',
         'fraction_type': 'MASSFRAC',
-        'target': 0.999,
+        'target': 0.997,
     },
     'Case1_COL5': {
         'stream': 'AMS',
@@ -308,8 +312,10 @@ def get_case_config(case_name: str) -> Optional[Dict]:
             'feed_bounds': col_template['feed_bounds'],
             'pressure_bounds': col_template['pressure_bounds'],
         },
+        # Minimum stages constraint - prevents boundary convergence issues
+        'min_section_stages': col_template.get('min_section_stages', 3),
     }
-    
+
     return config
 
 
@@ -511,25 +517,39 @@ def get_column_template(column_name: str) -> Optional[Dict]:
 # OUTPUT DIRECTORY HELPER
 # ════════════════════════════════════════════════════════════════════════════
 
-def create_run_output_dir(case_name: str, base_dir: str = "results") -> str:
+def create_run_output_dir(case_name: str, algorithm: str = "ISO", base_dir: str = "results") -> str:
     """
     Create a timestamped output directory for a specific run.
+
+    Uses hierarchical structure: results/Case1/COL2/ISO_20260118_120000/
 
     Parameters
     ----------
     case_name : str
         Case identifier (e.g., 'Case1_COL2')
+    algorithm : str
+        Algorithm name (e.g., 'ISO', 'PSO', 'GA'). Default: 'ISO'
     base_dir : str
         Base results directory (default: 'results')
 
     Returns
     -------
-    str : Path to the created directory (e.g., 'results/Case1_COL2_20260118_120000/')
+    str : Path to the created directory (e.g., 'results/Case1/COL2/ISO_20260118_120000/')
     """
     from datetime import datetime
 
+    # Parse case_name to extract Case and Column
+    parts = case_name.split('_')
+    if len(parts) >= 2:
+        case = parts[0]    # Case1
+        column = parts[1]  # COL2
+    else:
+        # Fallback for unexpected format
+        case = case_name
+        column = "unknown"
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join(base_dir, f"{case_name}_{timestamp}")
+    run_dir = os.path.join(base_dir, case, column, f"{algorithm}_{timestamp}")
     os.makedirs(run_dir, exist_ok=True)
 
     return run_dir

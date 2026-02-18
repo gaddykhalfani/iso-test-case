@@ -158,17 +158,44 @@ if PYMOO_AVAILABLE:
             self.min_section_stages = config.get('min_section_stages', 3)
 
             # Extract bounds
-            nt_bounds = config['bounds']['nt_bounds']
-            feed_bounds = config['bounds']['feed_bounds']
-            p_bounds = config['bounds']['pressure_bounds']
+            self.nt_bounds = config['bounds']['nt_bounds']
+            self.feed_bounds = config['bounds']['feed_bounds']
+            self.p_bounds = config['bounds']['pressure_bounds']
 
             super().__init__(
                 n_var=3,
                 n_obj=1,
                 n_ieq_constr=1,  # Temperature constraint: g(x) <= 0
-                xl=np.array([nt_bounds[0], feed_bounds[0], p_bounds[0]]),
-                xu=np.array([nt_bounds[1], feed_bounds[1], p_bounds[1]]),
+                xl=np.array([self.nt_bounds[0], self.feed_bounds[0], self.p_bounds[0]]),
+                xu=np.array([self.nt_bounds[1], self.feed_bounds[1], self.p_bounds[1]]),
             )
+
+        def _compute_boundary_penalty(self, nt: int, feed: int) -> float:
+            """
+            Compute penalty for solutions near NT/feed boundaries.
+            This prevents the optimizer from getting stuck at boundary values.
+            """
+            penalty = 0.0
+
+            # Penalty for NT too close to lower bound
+            nt_margin = nt - self.nt_bounds[0]
+            if nt_margin < 5:  # Within 5 stages of lower bound
+                penalty += 5000 * (5 - nt_margin) ** 2
+
+            # Penalty for feed being constrained by NT (tight feed range)
+            valid_feed_range = nt - 2 * self.min_section_stages
+            if valid_feed_range < 10:  # Feed range is too narrow
+                penalty += 3000 * (10 - valid_feed_range) ** 2
+
+            # Penalty if feed is at its constrained boundary
+            max_valid_feed = nt - self.min_section_stages
+            min_valid_feed = self.min_section_stages + 1
+            if feed >= max_valid_feed - 1:  # Feed at or near upper constraint
+                penalty += 2000 * (1 + max_valid_feed - feed) ** 2
+            elif feed <= min_valid_feed + 1:  # Feed at or near lower constraint
+                penalty += 2000 * (1 + feed - min_valid_feed) ** 2
+
+            return penalty
 
         def _evaluate(self, X, out, *args, **kwargs):
             """Evaluate population."""
@@ -185,6 +212,11 @@ if PYMOO_AVAILABLE:
 
                 # Evaluate (with diagnostic on failure)
                 result = self.evaluator.evaluate(nt, feed, pressure, run_diagnostic_on_fail=True, rr_sweep_on_fail=True, purity_spec=self.purity_spec)
+
+                # Handle None result from evaluator
+                if result is None:
+                    logger.warning(f"  Evaluator returned None for NT={nt}, NF={feed}, P={pressure:.4f}")
+                    result = {'TAC': 1e12, 'T_reb': None, 'converged': False}
 
                 tac = result.get('TAC', 1e12)
                 T_reb = result.get('T_reb')
@@ -216,6 +248,12 @@ if PYMOO_AVAILABLE:
                 # Objective: TAC (add penalty for non-convergence)
                 if not converged:
                     tac = 1e12
+                else:
+                    # Add boundary penalty for feasible solutions to discourage boundary convergence
+                    boundary_penalty = self._compute_boundary_penalty(nt, feed)
+                    if boundary_penalty > 0:
+                        tac += boundary_penalty
+                        logger.debug(f"  Boundary penalty for NT={nt}, NF={feed}: ${boundary_penalty:.0f}")
 
                 f.append(tac)
 
@@ -341,6 +379,10 @@ class GAOptimizer:
         # RR sweep data from failed evaluations (for infeasible design visualization)
         self.failed_rr_sweeps = []
 
+        # Baseline TAC recording (for improvement metrics)
+        self.baseline_result = None
+        self.baseline_tac = None
+
         # Set random seed
         if self.ga_config.seed is not None:
             np.random.seed(self.ga_config.seed)
@@ -372,6 +414,44 @@ class GAOptimizer:
         logger.info("=" * 70)
 
         _emit_progress(0, "initialization", message="Initializing GA population")
+
+        # ════════════════════════════════════════════════════════════════════
+        # BASELINE TAC EVALUATION
+        # ════════════════════════════════════════════════════════════════════
+
+        initial = self.config.get('initial', {})
+        nt_bounds = self.config['bounds']['nt_bounds']
+        pressure_bounds = self.config['bounds']['pressure_bounds']
+
+        initial_nt = initial.get('nt', (nt_bounds[0] + nt_bounds[1]) // 2)
+        initial_feed = initial.get('feed', initial_nt // 2)
+        initial_pressure = initial.get('pressure', (pressure_bounds[0] + pressure_bounds[1]) / 2)
+
+        logger.info("")
+        logger.info("=" * 50)
+        logger.info("EVALUATING BASELINE TAC (Initial Configuration)")
+        logger.info("=" * 50)
+        logger.info(f"  NT={initial_nt}, Feed={initial_feed}, P={initial_pressure:.4f} bar")
+
+        _emit_progress(0, "baseline_evaluation", message="Evaluating baseline TAC")
+
+        baseline_eval = self.evaluator.evaluate(
+            initial_nt, initial_feed, initial_pressure,
+            purity_spec=self.purity_spec
+        )
+
+        if baseline_eval.get('converged', False) and baseline_eval.get('TAC', float('inf')) < 1e10:
+            self.baseline_tac = baseline_eval.get('TAC')
+            self.baseline_result = baseline_eval
+            logger.info(f"  BASELINE TAC: ${self.baseline_tac:,.0f}/year")
+        else:
+            self.baseline_tac = None
+            self.baseline_result = baseline_eval
+            logger.warning("  Baseline did not converge or is infeasible")
+            logger.info("  Proceeding without baseline comparison")
+
+        logger.info("=" * 50)
+        logger.info("")
 
         # Create problem
         problem = DistillationProblem(self.evaluator, self.config, optimizer_ref=self, purity_spec=self.purity_spec)
@@ -492,6 +572,45 @@ class GAOptimizer:
         logger.info(f"  Infeasible: {result.infeasible_evaluations}")
         logger.info("=" * 70)
 
+    def _build_baseline_section(self) -> dict:
+        """Build baseline section for result JSON."""
+        if self.baseline_result is None:
+            return {
+                'recorded': False,
+                'reason': 'No baseline evaluation performed',
+            }
+
+        initial = self.config.get('initial', {})
+        return {
+            'recorded': True,
+            'nt': initial.get('nt'),
+            'feed': initial.get('feed'),
+            'pressure': initial.get('pressure'),
+            'tac': self.baseline_tac,
+            'converged': self.baseline_tac is not None,
+        }
+
+    def _build_improvement_section(self) -> dict:
+        """Build improvement metrics section for result JSON."""
+        if self.baseline_tac is None or self.baseline_tac <= 0:
+            return {
+                'baseline_available': False,
+                'reason': 'Baseline TAC not available (did not converge or infeasible)',
+            }
+
+        optimized_tac = self.result.optimal_tac
+        absolute_savings = self.baseline_tac - optimized_tac
+        relative_improvement = (absolute_savings / self.baseline_tac) * 100
+
+        return {
+            'baseline_available': True,
+            'baseline_tac': round(self.baseline_tac, 2),
+            'optimized_tac': round(optimized_tac, 2),
+            'absolute_savings_per_year': round(absolute_savings, 2),
+            'relative_improvement_percent': round(relative_improvement, 2),
+            'summary': f"${absolute_savings:,.0f}/year savings ({relative_improvement:.1f}% reduction)",
+        }
+
     def save_results(self, output_dir: str = "results") -> str:
         """Save results to JSON file."""
         os.makedirs(output_dir, exist_ok=True)
@@ -501,6 +620,10 @@ class GAOptimizer:
 
         result = self.result
 
+        # Build baseline and improvement sections
+        baseline_section = self._build_baseline_section()
+        improvement_section = self._build_improvement_section()
+
         output = {
             'metadata': {
                 'methodology': 'Genetic Algorithm (GA) using pymoo',
@@ -509,6 +632,7 @@ class GAOptimizer:
                 'pop_size': result.pop_size,
                 'n_generations': result.n_generations,
             },
+            'baseline': baseline_section,
             'optimal': {
                 'nt': result.optimal_nt,
                 'feed': result.optimal_feed,
@@ -518,6 +642,7 @@ class GAOptimizer:
                 'tpc': result.optimal_tpc,
                 'toc': result.optimal_toc,
             },
+            'improvement': improvement_section,
             'convergence': {
                 'history': result.convergence_history,
             },
@@ -560,14 +685,50 @@ class SimpleGAOptimizer:
         self.ga_config = ga_config or GAConfig()
         self.purity_spec = purity_spec
         self.T_reb_max = config.get('T_reb_max', T_REBOILER_MAX)
+        self.min_section_stages = config.get('min_section_stages', 3)
+
+        # Store bounds for boundary penalty calculation
+        self.nt_bounds = config['bounds']['nt_bounds']
+        self.feed_bounds = config['bounds']['feed_bounds']
 
         self.eval_count = 0
         self.feasible_count = 0
         self.infeasible_count = 0
         self.convergence_history = []
 
+        # Baseline TAC recording (for improvement metrics)
+        self.baseline_result = None
+        self.baseline_tac = None
+
         if self.ga_config.seed is not None:
             np.random.seed(self.ga_config.seed)
+
+    def _compute_boundary_penalty(self, nt: int, feed: int) -> float:
+        """
+        Compute penalty for solutions near NT/feed boundaries.
+        This prevents the optimizer from getting stuck at boundary values.
+        """
+        penalty = 0.0
+
+        # Penalty for NT too close to lower bound
+        nt_margin = nt - self.nt_bounds[0]
+        if nt_margin < 5:
+            penalty += 5000 * (5 - nt_margin) ** 2
+
+        # Penalty for feed being constrained by NT (tight feed range)
+        valid_feed_range = nt - 2 * self.min_section_stages
+        if valid_feed_range < 10:
+            penalty += 3000 * (10 - valid_feed_range) ** 2
+
+        # Penalty if feed is at its constrained boundary
+        max_valid_feed = nt - self.min_section_stages
+        min_valid_feed = self.min_section_stages + 1
+        if feed >= max_valid_feed - 1:
+            penalty += 2000 * (1 + max_valid_feed - feed) ** 2
+        elif feed <= min_valid_feed + 1:
+            penalty += 2000 * (1 + feed - min_valid_feed) ** 2
+
+        return penalty
 
     def run(self, case_name: str = "Case") -> GAResult:
         """Run simple GA optimization."""
@@ -582,6 +743,40 @@ class SimpleGAOptimizer:
         nt_bounds = self.config['bounds']['nt_bounds']
         feed_bounds = self.config['bounds']['feed_bounds']
         p_bounds = self.config['bounds']['pressure_bounds']
+
+        # ════════════════════════════════════════════════════════════════════
+        # BASELINE TAC EVALUATION
+        # ════════════════════════════════════════════════════════════════════
+
+        initial = self.config.get('initial', {})
+        initial_nt = initial.get('nt', (nt_bounds[0] + nt_bounds[1]) // 2)
+        initial_feed = initial.get('feed', initial_nt // 2)
+        initial_pressure = initial.get('pressure', (p_bounds[0] + p_bounds[1]) / 2)
+
+        logger.info("")
+        logger.info("=" * 50)
+        logger.info("EVALUATING BASELINE TAC (Initial Configuration)")
+        logger.info("=" * 50)
+        logger.info(f"  NT={initial_nt}, Feed={initial_feed}, P={initial_pressure:.4f} bar")
+
+        _emit_progress(0, "baseline_evaluation", message="Evaluating baseline TAC")
+
+        baseline_eval = self.evaluator.evaluate(
+            initial_nt, initial_feed, initial_pressure,
+            purity_spec=self.purity_spec
+        )
+
+        if baseline_eval.get('converged', False) and baseline_eval.get('TAC', float('inf')) < 1e10:
+            self.baseline_tac = baseline_eval.get('TAC')
+            self.baseline_result = baseline_eval
+            logger.info(f"  BASELINE TAC: ${self.baseline_tac:,.0f}/year")
+        else:
+            self.baseline_tac = None
+            self.baseline_result = baseline_eval
+            logger.warning("  Baseline did not converge or is infeasible")
+
+        logger.info("=" * 50)
+        logger.info("")
 
         pop_size = self.ga_config.pop_size
         n_gen = self.ga_config.n_generations
@@ -605,6 +800,10 @@ class SimpleGAOptimizer:
             fitness = []
             for ind in population:
                 nt, feed, pressure = int(ind[0]), int(ind[1]), ind[2]
+
+                # Enforce valid feed based on min_section_stages
+                feed = max(self.min_section_stages + 1, min(feed, nt - self.min_section_stages))
+
                 result = self.evaluator.evaluate(nt, feed, pressure, run_diagnostic_on_fail=True, rr_sweep_on_fail=True, purity_spec=self.purity_spec)
                 self.eval_count += 1
 
@@ -618,7 +817,9 @@ class SimpleGAOptimizer:
 
                 if converged and T_reb <= self.T_reb_max:
                     self.feasible_count += 1
-                    fit = tac
+                    # Add boundary penalty to discourage boundary convergence
+                    boundary_penalty = self._compute_boundary_penalty(nt, feed)
+                    fit = tac + boundary_penalty
                 else:
                     self.infeasible_count += 1
                     fit = tac + 1e6 * max(0, T_reb - self.T_reb_max) ** 2
@@ -705,19 +906,64 @@ class SimpleGAOptimizer:
 
         return result
 
+    def _build_baseline_section(self) -> dict:
+        """Build baseline section for result JSON."""
+        if self.baseline_result is None:
+            return {
+                'recorded': False,
+                'reason': 'No baseline evaluation performed',
+            }
+
+        initial = self.config.get('initial', {})
+        return {
+            'recorded': True,
+            'nt': initial.get('nt'),
+            'feed': initial.get('feed'),
+            'pressure': initial.get('pressure'),
+            'tac': self.baseline_tac,
+            'converged': self.baseline_tac is not None,
+        }
+
+    def _build_improvement_section(self) -> dict:
+        """Build improvement metrics section for result JSON."""
+        if self.baseline_tac is None or self.baseline_tac <= 0:
+            return {
+                'baseline_available': False,
+                'reason': 'Baseline TAC not available',
+            }
+
+        optimized_tac = self.result.optimal_tac
+        absolute_savings = self.baseline_tac - optimized_tac
+        relative_improvement = (absolute_savings / self.baseline_tac) * 100
+
+        return {
+            'baseline_available': True,
+            'baseline_tac': round(self.baseline_tac, 2),
+            'optimized_tac': round(optimized_tac, 2),
+            'absolute_savings_per_year': round(absolute_savings, 2),
+            'relative_improvement_percent': round(relative_improvement, 2),
+            'summary': f"${absolute_savings:,.0f}/year savings ({relative_improvement:.1f}% reduction)",
+        }
+
     def save_results(self, output_dir: str = "results") -> str:
         """Save results to JSON file."""
         os.makedirs(output_dir, exist_ok=True)
         result = self.result
 
+        # Build baseline and improvement sections
+        baseline_section = self._build_baseline_section()
+        improvement_section = self._build_improvement_section()
+
         output = {
             'metadata': {'algorithm': 'GA (simple)'},
+            'baseline': baseline_section,
             'optimal': {
                 'nt': result.optimal_nt,
                 'feed': result.optimal_feed,
                 'pressure': result.optimal_pressure,
                 'tac': result.optimal_tac,
             },
+            'improvement': improvement_section,
             'statistics': {
                 'total_evaluations': result.total_evaluations,
                 'time_seconds': result.total_time_seconds,
@@ -868,6 +1114,16 @@ def main():
     except ImportError:
         purity_spec = None
         logger.warning("Could not import get_purity_spec from config")
+
+    # Auto-detect purity target from Aspen Design Specs
+    if purity_spec and not args.demo and aspen:
+        auto_target = aspen.auto_detect_purity_target(config['column']['block_name'])
+        if auto_target and auto_target.get('target') is not None:
+            if purity_spec.get('target') != auto_target['target']:
+                logger.warning("  Config purity target ({}) != Aspen Design Spec target ({})".format(
+                    purity_spec.get('target'), auto_target['target']))
+                logger.info("  Auto-updating purity target to {}".format(auto_target['target']))
+            purity_spec['target'] = auto_target['target']
 
     # Track aspen for cleanup
     aspen_instance = None

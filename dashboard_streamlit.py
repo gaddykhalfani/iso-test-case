@@ -814,6 +814,73 @@ def test_discord_webhook(webhook_url: str = None) -> Dict:
         return {"success": False, "message": str(e)}
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# BATCH RUN HELPER FUNCTIONS
+# ════════════════════════════════════════════════════════════════════════════
+
+def start_batch_run(case: str, algorithm: str, n_runs: int, demo: bool = True,
+                    n_particles: int = 20, n_iterations: int = 50,
+                    base_seed: int = 42, config_overrides: dict = None) -> Optional[Dict]:
+    """Start a batch of optimization runs."""
+    payload = {
+        "case": case,
+        "algorithm": algorithm,
+        "n_runs": n_runs,
+        "demo": demo,
+        "n_particles": n_particles,
+        "n_iterations": n_iterations,
+        "base_seed": base_seed,
+        "config_overrides": config_overrides,
+    }
+    try:
+        resp = requests.post(f"{API_BASE_URL}/batch/run", json=payload, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            st.error(f"Failed to start batch: {resp.text}")
+            return None
+    except requests.exceptions.ConnectionError:
+        st.error(f"Cannot connect to API at {API_BASE_URL}. Is the server running?")
+        return None
+    except Exception as e:
+        st.error(f"Error starting batch: {e}")
+        return None
+
+
+def get_batch_status(batch_id: str) -> Optional[Dict]:
+    """Get status of a batch run."""
+    try:
+        resp = requests.get(f"{API_BASE_URL}/batch/status/{batch_id}", timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except Exception:
+        return None
+
+
+def stop_batch_run(batch_id: str) -> Optional[Dict]:
+    """Stop a running batch."""
+    try:
+        resp = requests.post(f"{API_BASE_URL}/batch/stop/{batch_id}", timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except Exception as e:
+        st.error(f"Error stopping batch: {e}")
+        return None
+
+
+def list_batches() -> List[Dict]:
+    """List all batch runs."""
+    try:
+        resp = requests.get(f"{API_BASE_URL}/batch/list", timeout=5)
+        if resp.status_code == 200:
+            return resp.json().get("batches", [])
+        return []
+    except Exception:
+        return []
+
+
 @st.cache_data(ttl=300)
 def load_sweep_data(result_folder: str) -> Optional[List[Dict]]:
     """Load sweep data from a result folder for 3D plots."""
@@ -1653,7 +1720,7 @@ st.sidebar.markdown("""
 # Mode selection
 mode = st.sidebar.radio(
     "Mode",
-    ["Run Optimization", "Statistics", "Analysis", "Results Browser"],
+    ["Run Optimization", "Batch Experiments", "Statistics", "Analysis", "Results Browser"],
     index=0
 )
 st.session_state.mode = mode
@@ -1958,6 +2025,376 @@ if mode == "Run Optimization":
 
     # Note: Auto-refresh moved to global scope at end of script
 
+elif mode == "Batch Experiments":
+    st.markdown("""
+    <div style="
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 0.5rem;
+    ">
+        <span style="font-size: 1.3rem; color: #e040fb;">&#128257;</span>
+        <h2 style="margin: 0; color: #e6edf3; font-weight: 700; letter-spacing: -0.01em;">Batch Experiments</h2>
+    </div>
+    """, unsafe_allow_html=True)
+    st.caption("Run multiple GA/PSO optimizations with different seeds to get statistical confidence in results.")
+
+    # Initialize batch session state
+    if "batch_id" not in st.session_state:
+        st.session_state.batch_id = None
+    if "batch_status" not in st.session_state:
+        st.session_state.batch_status = None
+
+    # Configuration form
+    st.markdown("### Configuration")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        batch_case = st.selectbox(
+            "Case",
+            available_cases,
+            key="batch_case_select",
+            disabled=st.session_state.batch_status == "running"
+        )
+
+    with col2:
+        batch_algorithm = st.selectbox(
+            "Algorithm",
+            ["PSO", "GA"],
+            key="batch_algo_select",
+            disabled=st.session_state.batch_status == "running",
+            help="Batch runs only support PSO and GA (stochastic algorithms)"
+        )
+
+    with col3:
+        batch_demo = st.checkbox(
+            "Demo Mode",
+            value=True,
+            key="batch_demo_checkbox",
+            disabled=st.session_state.batch_status == "running",
+            help="Run without Aspen"
+        )
+
+    col4, col5, col6 = st.columns(3)
+
+    with col4:
+        n_runs = st.number_input(
+            "Number of Runs",
+            min_value=2,
+            max_value=50,
+            value=10,
+            key="batch_n_runs",
+            disabled=st.session_state.batch_status == "running",
+            help="How many times to run the optimization with different seeds"
+        )
+
+    with col5:
+        base_seed = st.number_input(
+            "Base Seed",
+            min_value=0,
+            max_value=9999,
+            value=42,
+            key="batch_base_seed",
+            disabled=st.session_state.batch_status == "running",
+            help="Seeds will be: base, base+1, base+2, ..."
+        )
+
+    with col6:
+        n_particles = st.number_input(
+            "Population Size",
+            min_value=5,
+            max_value=100,
+            value=20,
+            key="batch_n_particles",
+            disabled=st.session_state.batch_status == "running",
+            help="n_particles for PSO, pop_size for GA"
+        )
+
+    col7, col8, _ = st.columns(3)
+
+    with col7:
+        n_iterations = st.number_input(
+            "Iterations/Generations",
+            min_value=10,
+            max_value=500,
+            value=50,
+            key="batch_n_iterations",
+            disabled=st.session_state.batch_status == "running",
+            help="n_iterations for PSO, n_generations for GA"
+        )
+
+    # Show generated seeds preview
+    seeds_preview = [base_seed + i for i in range(min(n_runs, 5))]
+    more_text = f"... +{n_runs - 5} more" if n_runs > 5 else ""
+    st.caption(f"Seeds: {seeds_preview}{more_text}")
+
+    st.markdown("---")
+
+    # Control buttons
+    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
+
+    with btn_col1:
+        if st.session_state.batch_status != "running":
+            if st.button("Start Batch", type="primary", key="start_batch_btn"):
+                if api_ok:
+                    result = start_batch_run(
+                        case=batch_case,
+                        algorithm=batch_algorithm,
+                        n_runs=n_runs,
+                        demo=batch_demo,
+                        n_particles=n_particles,
+                        n_iterations=n_iterations,
+                        base_seed=base_seed,
+                    )
+                    if result:
+                        st.session_state.batch_id = result.get("batch_id")
+                        st.session_state.batch_status = "running"
+                        st.rerun()
+                else:
+                    st.error("API not available. Start the server first.")
+        else:
+            if st.button("Stop Batch", type="secondary", key="stop_batch_btn"):
+                if st.session_state.batch_id:
+                    stop_batch_run(st.session_state.batch_id)
+                    st.session_state.batch_status = "stopped"
+                    st.rerun()
+
+    with btn_col2:
+        if st.button("Clear Results", key="clear_batch_btn"):
+            st.session_state.batch_id = None
+            st.session_state.batch_status = None
+            st.rerun()
+
+    # Progress and Results Display
+    if st.session_state.batch_id:
+        batch_data = get_batch_status(st.session_state.batch_id)
+
+        if batch_data:
+            st.session_state.batch_status = batch_data.get("status")
+
+            st.markdown("---")
+            st.markdown("### Progress")
+
+            # Status badge and progress
+            status = batch_data.get("status", "unknown")
+            status_color = {
+                "running": "#4cdf8a",
+                "done": "#4fc3f7",
+                "failed": "#ef5350",
+                "killed": "#ffb74d",
+            }.get(status, "#8b949e")
+
+            stats = batch_data.get("statistics", {})
+            n_completed = stats.get("n_completed", 0)
+            n_total = stats.get("n_total", n_runs)
+            progress_pct = n_completed / n_total if n_total > 0 else 0
+
+            col_p1, col_p2, col_p3 = st.columns([2, 1, 1])
+
+            with col_p1:
+                st.progress(progress_pct, text=f"Progress: {n_completed}/{n_total} runs completed")
+
+            with col_p2:
+                st.markdown(f"""
+                <span style="
+                    background: {status_color}20;
+                    color: {status_color};
+                    padding: 0.3rem 0.8rem;
+                    border-radius: 8px;
+                    font-weight: 600;
+                    text-transform: uppercase;
+                ">{status}</span>
+                """, unsafe_allow_html=True)
+
+            with col_p3:
+                elapsed = batch_data.get("elapsed_seconds", 0)
+                if elapsed:
+                    st.caption(f"Elapsed: {elapsed:.0f}s")
+
+            # Statistics Cards
+            if n_completed > 0:
+                st.markdown("### Statistics")
+                stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
+
+                with stat_col1:
+                    tac_best = stats.get("tac_best")
+                    st.metric("Best TAC", f"${tac_best:,.0f}" if tac_best else "N/A")
+
+                with stat_col2:
+                    tac_mean = stats.get("tac_mean")
+                    st.metric("Mean TAC", f"${tac_mean:,.0f}" if tac_mean else "N/A")
+
+                with stat_col3:
+                    tac_std = stats.get("tac_std")
+                    st.metric("Std Dev", f"${tac_std:,.0f}" if tac_std else "N/A")
+
+                with stat_col4:
+                    tac_worst = stats.get("tac_worst")
+                    st.metric("Worst TAC", f"${tac_worst:,.0f}" if tac_worst else "N/A")
+
+                with stat_col5:
+                    tac_median = stats.get("tac_median")
+                    st.metric("Median TAC", f"${tac_median:,.0f}" if tac_median else "N/A")
+
+                # Best configuration
+                best_config = stats.get("best_config")
+                if best_config:
+                    st.markdown(f"""
+                    <div style="
+                        background: rgba(102, 187, 106, 0.1);
+                        border: 1px solid rgba(102, 187, 106, 0.3);
+                        border-radius: 10px;
+                        padding: 1rem;
+                        margin: 1rem 0;
+                    ">
+                        <div style="font-weight: 600; color: #66bb6a; margin-bottom: 0.5rem;">Best Configuration (Seed {best_config.get('seed', '?')})</div>
+                        <div style="color: #c9d1d9;">
+                            NT = <strong>{best_config.get('nt', '?')}</strong> |
+                            Feed = <strong>{best_config.get('feed', '?')}</strong> |
+                            Pressure = <strong>{best_config.get('pressure') or 0:.3f}</strong> bar |
+                            TAC = <strong>${best_config.get('tac') or 0:,.0f}</strong>/year
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            # Individual Runs Table
+            st.markdown("### Individual Runs")
+            individual_runs = batch_data.get("individual_runs", [])
+
+            if individual_runs:
+                # Create dataframe for display
+                run_data = []
+                for run in individual_runs:
+                    tac_val = run.get("tac")
+                    run_data.append({
+                        "Run #": run.get("run_index", 0) + 1,
+                        "Seed": run.get("seed", "?"),
+                        "Status": run.get("status", "pending").upper(),
+                        "TAC ($/year)": f"${tac_val:,.0f}" if tac_val else "-",
+                        "Time (s)": f"{run.get('time_seconds', run.get('elapsed_seconds', 0)):.1f}" if run.get('time_seconds') or run.get('elapsed_seconds') else "-",
+                    })
+
+                df = pd.DataFrame(run_data)
+
+                # Style the dataframe
+                def style_status(val):
+                    colors = {
+                        "RUNNING": "color: #4cdf8a; font-weight: bold;",
+                        "DONE": "color: #4fc3f7;",
+                        "FAILED": "color: #ef5350;",
+                        "KILLED": "color: #ffb74d;",
+                        "PENDING": "color: #8b949e;",
+                    }
+                    return colors.get(val, "")
+
+                st.dataframe(
+                    df,
+                    width='stretch',
+                    hide_index=True,
+                )
+
+            # TAC Distribution Chart (if enough data)
+            if n_completed >= 3:
+                st.markdown("### TAC Distribution")
+
+                completed_tacs = [
+                    r.get("tac") for r in individual_runs
+                    if r.get("tac") and r.get("status") == "done"
+                ]
+
+                if completed_tacs:
+                    fig = go.Figure()
+
+                    # Box plot
+                    fig.add_trace(go.Box(
+                        y=completed_tacs,
+                        name=f"{batch_algorithm}",
+                        marker_color=ALGO_COLORS.get(batch_algorithm, "#8b949e"),
+                        boxpoints='all',
+                        jitter=0.3,
+                        pointpos=-1.8,
+                    ))
+
+                    fig.update_layout(
+                        template="plotly_dark",
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(30, 32, 48, 0.6)',
+                        yaxis_title="TAC ($/year)",
+                        yaxis=dict(tickformat="$,.0f"),
+                        height=300,
+                        margin=dict(l=60, r=20, t=30, b=40),
+                        showlegend=False,
+                    )
+
+                    st.plotly_chart(fig, width='stretch')
+
+            # Export Results (when done)
+            if status == "done":
+                st.markdown("---")
+                st.markdown("### Export Results")
+
+                export_data = {
+                    "batch_id": batch_data.get("batch_id"),
+                    "case": batch_data.get("case"),
+                    "algorithm": batch_data.get("algorithm"),
+                    "n_runs": batch_data.get("n_runs"),
+                    "config": batch_data.get("config"),
+                    "statistics": stats,
+                    "individual_runs": individual_runs,
+                    "timestamp": datetime.now().isoformat(),
+                }
+
+                col_exp1, col_exp2 = st.columns(2)
+
+                with col_exp1:
+                    st.download_button(
+                        label="Download JSON",
+                        data=json.dumps(export_data, indent=2),
+                        file_name=f"batch_{batch_algorithm}_{batch_case}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json",
+                    )
+
+                with col_exp2:
+                    # Create CSV
+                    csv_rows = ["Run,Seed,Status,TAC,Time_s"]
+                    for run in individual_runs:
+                        tac = run.get("tac", "")
+                        time_s = run.get("time_seconds", run.get("elapsed_seconds", ""))
+                        csv_rows.append(f"{run.get('run_index', 0)+1},{run.get('seed', '')},{run.get('status', '')},{tac},{time_s}")
+                    csv_data = "\n".join(csv_rows)
+
+                    st.download_button(
+                        label="Download CSV",
+                        data=csv_data,
+                        file_name=f"batch_{batch_algorithm}_{batch_case}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                    )
+
+    # Show previous batches
+    st.markdown("---")
+    with st.expander("Previous Batches", expanded=False):
+        batch_list = list_batches()
+        if batch_list:
+            for batch in batch_list[:10]:  # Show last 10
+                status = batch.get("status", "unknown")
+                status_icon = {"running": "🟢", "done": "✅", "failed": "❌", "killed": "⚠️"}.get(status, "⚪")
+                tac_best = batch.get("tac_best")
+                tac_str = f"${tac_best:,.0f}" if tac_best else "N/A"
+                st.markdown(f"""
+                {status_icon} **{batch.get('algorithm')}** on {batch.get('case')} -
+                {batch.get('progress')} runs - Best TAC: {tac_str} -
+                {batch.get('elapsed_seconds', 0):.0f}s
+                """)
+
+                if st.button("Load", key=f"load_batch_{batch.get('batch_id')}"):
+                    st.session_state.batch_id = batch.get("batch_id")
+                    st.session_state.batch_status = batch.get("status")
+                    st.rerun()
+        else:
+            st.caption("No previous batches found")
+
+
 elif mode == "Statistics":
     st.markdown("""
     <div style="
@@ -2222,22 +2659,28 @@ elif mode == "Results Browser":
     st.markdown("---")
     st.subheader("Plots")
 
-    png_files = sorted(glob.glob(str(RESULTS_DIR / "*.png")), key=os.path.getmtime, reverse=True)
+    # Use recursive glob to find plots in nested case/column directories
+    png_files = sorted(glob.glob(str(RESULTS_DIR / "**/*.png"), recursive=True), key=os.path.getmtime, reverse=True)
 
     if png_files:
         # Group by type
         st.write(f"Found {len(png_files)} plot files")
 
-        # Filter
-        plot_filter = st.text_input("Filter plots by name", "")
+        # Filter (searches full path including case/column directories)
+        plot_filter = st.text_input("Filter plots (e.g., 'Case1', 'COL2', 'convergence')", "")
 
-        filtered_plots = [p for p in png_files if plot_filter.lower() in os.path.basename(p).lower()]
+        filtered_plots = [p for p in png_files if plot_filter.lower() in p.lower()]
 
         # Display in grid
         cols = st.columns(2)
         for i, plot in enumerate(filtered_plots[:10]):
             with cols[i % 2]:
-                st.image(plot, caption=os.path.basename(plot), width='stretch')
+                # Show relative path from results dir to indicate case/column
+                try:
+                    rel_path = os.path.relpath(plot, RESULTS_DIR)
+                except ValueError:
+                    rel_path = os.path.basename(plot)
+                st.image(plot, caption=rel_path, width='stretch')
     else:
         st.info("No plots found in results folder.")
 
@@ -2283,9 +2726,12 @@ _has_any_jobs = any(
     for slot in range(MAX_CONCURRENT_RUNS)
 )
 
-if _any_jobs_running:
+# Also check if a batch is running
+_batch_running = st.session_state.get("batch_status") == "running"
+
+if _any_jobs_running or _batch_running:
     time.sleep(5)
     st.rerun()
-elif _has_any_jobs:
+elif _has_any_jobs or st.session_state.get("batch_id"):
     time.sleep(30)
     st.rerun()

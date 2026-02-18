@@ -33,24 +33,55 @@ class AspenEnergyOptimizer:
     
     def connect_and_open(self, visible=True):
         """Connect to Aspen and open file"""
-        try:
-            logger.info("Connecting to Aspen Plus...")
-            self.aspen = win32.gencache.EnsureDispatch("Apwn.Document")
-            self.aspen.InitFromArchive2(self.file_path)
-            self.aspen.Visible = visible
-            
+        for attempt in range(2):
             try:
-                self.aspen.SuppressDialogs = 1
-                logger.info("  Dialogs suppressed for automation")
-            except:
-                pass
-            
-            self.connected = True
-            logger.info("Connected successfully!")
-            return True
-        except Exception as e:
-            logger.error("Failed to connect: {}".format(e))
-            return False
+                logger.info("Connecting to Aspen Plus...")
+                if attempt == 0:
+                    self.aspen = win32.gencache.EnsureDispatch("Apwn.Document")
+                else:
+                    # Late binding — bypasses gen_py cache entirely
+                    logger.info("  Using late-bound Dispatch (no cache)...")
+                    self.aspen = win32.Dispatch("Apwn.Document")
+
+                self.aspen.InitFromArchive2(self.file_path)
+                self.aspen.Visible = visible
+
+                try:
+                    self.aspen.SuppressDialogs = 1
+                    logger.info("  Dialogs suppressed for automation")
+                except:
+                    pass
+
+                self.connected = True
+                logger.info("Connected successfully!")
+                return True
+            except Exception as e:
+                if attempt == 0 and "gen_py" in str(e):
+                    logger.warning("COM cache corrupted, cleaning up and falling back to late binding...")
+                    self._cleanup_com_cache()
+                    continue
+                logger.error("Failed to connect: {}".format(e))
+                return False
+
+    def _cleanup_com_cache(self):
+        """Clear corrupted win32com gen_py cache from memory and disk."""
+        import sys, os, shutil
+        try:
+            # 1. Remove gen_py modules from Python's in-memory cache
+            mods_to_remove = [m for m in sys.modules if m.startswith('win32com.gen_py.')]
+            for mod in mods_to_remove:
+                del sys.modules[mod]
+            if mods_to_remove:
+                logger.info("  Cleared {} gen_py modules from sys.modules".format(len(mods_to_remove)))
+
+            # 2. Delete disk cache
+            gen_py_path = os.path.join(
+                os.environ.get('LOCALAPPDATA', ''), 'Temp', 'gen_py')
+            if os.path.exists(gen_py_path):
+                shutil.rmtree(gen_py_path, ignore_errors=True)
+                logger.info("  Cleared gen_py cache at: {}".format(gen_py_path))
+        except Exception as err:
+            logger.warning("  Cache cleanup failed: {}".format(err))
     
     def reconnect(self):
         """Reconnect to Aspen if connection was lost"""
@@ -170,7 +201,7 @@ class AspenEnergyOptimizer:
 
         except Exception as e:
             error_str = str(e)
-            if "RPC" in error_str or "remote procedure" in error_str.lower():
+            if any(kw in error_str.upper() for kw in ["RPC", "OLE", "0XE0434352", "REMOTE PROCEDURE"]):
                 logger.error("Aspen crashed! Error: {}".format(e))
                 self.connected = False
             else:
@@ -547,14 +578,14 @@ class AspenEnergyOptimizer:
             logger.warning("  Duty calculation failed, using default: 1.0 m")
             return 1.0
     
-    def get_reflux_ratio(self, block_name, vary_num=2):
+    def get_output_rr(self, block_name, vary_num=2):
         """
-        Get actual reflux ratio from Aspen.
-        
+        Get actual reflux ratio from Aspen OUTPUT.
+
         Tries multiple paths in order of preference:
         1. VAR_VAL\2 output (calculated RR from Vary block when Design Spec is active)
         2. MOLE_RR output (standard reflux ratio output)
-        
+
         Parameters
         ----------
         block_name : str
@@ -562,7 +593,7 @@ class AspenEnergyOptimizer:
         vary_num : int, optional
             Specific Vary block number to read from (default: 2)
             VAR_VAL\2 typically contains the RR from Vary block
-            
+
         Returns
         -------
         float : Reflux ratio value, or 0.0 if not found
@@ -648,6 +679,105 @@ class AspenEnergyOptimizer:
         except Exception as e:
             logger.warning("Error getting Design Spec {} info: {}".format(spec_num, e))
             return None
+
+    def get_design_spec_type(self, block_name, spec_num=1):
+        """
+        Get the type of a Design Spec (e.g., MASS-FRAC, MASS-REC).
+
+        Reads from: \\Data\\Blocks\\{block}\\Input\\SPEC_TYPE\\{spec_num}
+
+        Parameters
+        ----------
+        block_name : str
+            Name of the RadFrac block
+        spec_num : int
+            Design Spec number
+
+        Returns
+        -------
+        str or None : Spec type string (e.g., 'MASS-FRAC', 'MOLE-FRAC', 'MASS-REC')
+        """
+        try:
+            path = "\\Data\\Blocks\\{}\\Input\\SPEC_TYPE\\{}".format(block_name, spec_num)
+            node = self.aspen.Tree.FindNode(path)
+            if node and node.Value:
+                return str(node.Value)
+        except Exception as e:
+            logger.debug("Could not read SPEC_TYPE for spec {}: {}".format(spec_num, e))
+        return None
+
+    def auto_detect_purity_target(self, block_name):
+        """
+        Auto-detect the purity Design Spec target from the Aspen block.
+
+        Reads all active Design Specs and identifies the purity spec
+        (MASS-FRAC or MOLE-FRAC type) vs recovery spec (MASS-REC type).
+
+        Parameters
+        ----------
+        block_name : str
+            Name of the RadFrac block
+
+        Returns
+        -------
+        dict or None : {'spec_num': int, 'target': float, 'spec_type': str}
+                       Returns None if no purity spec found
+        """
+        specs = self.get_all_design_specs(block_name)
+        if not specs:
+            logger.info("  No active Design Specs found for {}".format(block_name))
+            return None
+
+        logger.info("  Auto-detecting purity target from {} active Design Specs...".format(len(specs)))
+
+        # Try to identify purity spec by type
+        purity_specs = []
+        recovery_specs = []
+        unknown_specs = []
+
+        for spec in specs:
+            spec_type = self.get_design_spec_type(block_name, spec['spec_num'])
+            spec['spec_type'] = spec_type
+
+            if spec_type:
+                logger.info("    Spec {}: target={}, type={}".format(
+                    spec['spec_num'], spec['target'], spec_type))
+                type_upper = spec_type.upper()
+                if 'FRAC' in type_upper and 'REC' not in type_upper:
+                    purity_specs.append(spec)
+                elif 'REC' in type_upper:
+                    recovery_specs.append(spec)
+                else:
+                    unknown_specs.append(spec)
+            else:
+                logger.info("    Spec {}: target={}, type=unknown".format(
+                    spec['spec_num'], spec['target']))
+                unknown_specs.append(spec)
+
+        # Case 1: Found purity spec by type
+        if purity_specs:
+            chosen = purity_specs[0]
+            logger.info("  -> Auto-detected purity spec: Spec {} (target={}, type={})".format(
+                chosen['spec_num'], chosen['target'], chosen.get('spec_type')))
+            return chosen
+
+        # Case 2: Could not identify by type - use heuristic (lower target = purity)
+        if len(specs) >= 2:
+            sorted_specs = sorted(specs, key=lambda s: s['target'] if s['target'] else 1.0)
+            chosen = sorted_specs[0]
+            logger.warning("  -> Could not identify spec types, using heuristic (lowest target)")
+            logger.warning("     Selected Spec {} (target={}) as purity spec".format(
+                chosen['spec_num'], chosen['target']))
+            return chosen
+
+        # Case 3: Only one spec - assume it's purity
+        if len(specs) == 1:
+            chosen = specs[0]
+            logger.info("  -> Single spec found: Spec {} (target={})".format(
+                chosen['spec_num'], chosen['target']))
+            return chosen
+
+        return None
 
     def get_all_design_specs(self, block_name, max_specs=5):
         """
@@ -997,18 +1127,25 @@ class AspenEnergyOptimizer:
 
                 if status == 0 or (isinstance(status, str) and 'OK' in str(status).upper()):
                     result['converged_without_spec'] = True
+                else:
+                    logger.info("  BLKSTAT={} (not 0/OK, but will still read stream results)".format(status))
 
-                    # Get natural reflux ratio
-                    result['natural_rr'] = self.get_reflux_ratio(block_name)
+                # Always read stream results after successful simulation
+                # In forward mode, BLKSTAT may be non-zero (warnings) but streams are valid
+                result['natural_rr'] = self.get_output_rr(block_name)
 
-                    # Get achieved purity (use multi-component for middle split)
-                    if is_middle_split:
-                        result['achieved_purity'] = self.get_stream_multi_purity(
-                            product_stream, top_components, fraction_type)
-                    else:
-                        result['achieved_purity'] = self.get_stream_purity(
-                            product_stream, key_component, fraction_type)
+                if is_middle_split:
+                    result['achieved_purity'] = self.get_stream_multi_purity(
+                        product_stream, top_components, fraction_type)
+                else:
+                    result['achieved_purity'] = self.get_stream_purity(
+                        product_stream, key_component, fraction_type)
 
+                # If we got valid results, mark as converged
+                if result['achieved_purity'] is not None and result['achieved_purity'] > 0:
+                    result['converged_without_spec'] = True
+
+                if result['converged_without_spec']:
                     logger.info("  Converged without Design Specs!")
                     if result['natural_rr'] is not None:
                         logger.info("  Natural RR: {:.2f}".format(result['natural_rr']))
@@ -1083,9 +1220,550 @@ class AspenEnergyOptimizer:
             logger.warning("Error setting RR: {}".format(e))
             return False
 
+    def get_basis_rr(self, block_name):
+        """
+        Get current BASIS_RR value from Aspen INPUT.
+
+        Used to read the original reflux ratio before RR recovery
+        so it can be restored afterwards.
+
+        Path: \\Data\\Blocks\\{block}\\Input\\BASIS_RR
+
+        Parameters
+        ----------
+        block_name : str
+            Name of the RadFrac block
+
+        Returns
+        -------
+        float or None : Current BASIS_RR value, or None if not found
+        """
+        try:
+            path = "\\Data\\Blocks\\{}\\Input\\BASIS_RR".format(block_name)
+            node = self.aspen.Tree.FindNode(path)
+            if node:
+                return node.Value
+            else:
+                logger.warning("  RR input node not found at {}".format(path))
+                return None
+        except Exception as e:
+            logger.warning("Error getting RR: {}".format(e))
+            return None
+
+    def diagnose_column_config(self, block_name, max_vary=5, max_specs=5):
+        """
+        Introspect a RadFrac column's actual operating specification from Aspen Plus.
+
+        Reads ALL possible configuration paths to determine what operating spec
+        the column actually uses. Critical because sweep_rr_purity writes to
+        BASIS_RR, but if the column uses a different spec (e.g. D:F), BASIS_RR
+        is silently ignored.
+
+        Parameters
+        ----------
+        block_name : str
+            Name of the RadFrac block (e.g., 'COL2')
+        max_vary : int
+            Maximum number of Vary blocks to check (default: 5)
+        max_specs : int
+            Maximum number of Design Specs to check (default: 5)
+
+        Returns
+        -------
+        dict : Diagnostic results with keys:
+            - 'block_name', 'operating_spec', 'input_values', 'output_values'
+            - 'vary_blocks', 'design_specs', 'vary_tree_children'
+            - 'active_spec_type': str or None
+            - 'basis_rr_is_active': bool or None
+            - 'warnings': list of str
+        """
+        logger.info("=" * 60)
+        logger.info("COLUMN CONFIGURATION DIAGNOSTIC: {}".format(block_name))
+        logger.info("=" * 60)
+
+        result = {
+            'block_name': block_name,
+            'operating_spec': {},
+            'input_values': {},
+            'output_values': {},
+            'vary_blocks': [],
+            'design_specs': [],
+            'vary_tree_children': {},
+            'active_spec_type': None,
+            'basis_rr_is_active': None,
+            'warnings': [],
+        }
+
+        base_input = "\\Data\\Blocks\\{}\\Input".format(block_name)
+        base_output = "\\Data\\Blocks\\{}\\Output".format(block_name)
+
+        # ────────────────────────────────────────────────────────────
+        # SECTION 1: Operating Specification Type
+        # ────────────────────────────────────────────────────────────
+        logger.info("")
+        logger.info("--- SECTION 1: Operating Specification Type ---")
+
+        spec_type_paths = {
+            'OPT_SPEC\\1':  base_input + "\\OPT_SPEC\\1",
+            'OPT_SPEC\\2':  base_input + "\\OPT_SPEC\\2",
+            'SPEC\\1':      base_input + "\\SPEC\\1",
+            'SPEC\\2':      base_input + "\\SPEC\\2",
+            'CON_SPEC':     base_input + "\\CON_SPEC",
+            'CON_BASIS':    base_input + "\\CON_BASIS",
+            'CALC_MODE':    base_input + "\\CALC_MODE",
+            'COND_TYPE':    base_input + "\\CONDENSER",   # TOTAL, PARTIAL, NONE
+            'REB_TYPE':     base_input + "\\REBOILER",    # KETTLE, THERMOSIPHON, NONE
+            'OPT_RR':       base_input + "\\OPT_RR",
+            'OPT_DF':       base_input + "\\OPT_DF",
+            'OPT_BR':       base_input + "\\OPT_BR",
+            'OPT_D':        base_input + "\\OPT_D",
+            'OPT_B':        base_input + "\\OPT_B",
+            'NSTAGE':       base_input + "\\NSTAGE",
+            'FEED_STAGE\\1': base_input + "\\FEED_STAGE\\1",
+        }
+
+        for label, path in spec_type_paths.items():
+            try:
+                node = self.aspen.Tree.FindNode(path)
+                if node is not None:
+                    val = node.Value
+                    result['operating_spec'][label] = val
+                    if val is not None:
+                        logger.info("  {} = {}".format(label, val))
+                else:
+                    result['operating_spec'][label] = None
+            except Exception as e:
+                result['operating_spec'][label] = "ERROR: {}".format(e)
+                logger.debug("  {} -> error: {}".format(label, e))
+
+        # ────────────────────────────────────────────────────────────
+        # SECTION 2: All Operating Variable Input Values
+        # ────────────────────────────────────────────────────────────
+        logger.info("")
+        logger.info("--- SECTION 2: All Operating Variable Inputs ---")
+
+        input_paths = {
+            'BASIS_RR':  base_input + "\\BASIS_RR",
+            'BASIS_D':   base_input + "\\BASIS_D",
+            'BASIS_B':   base_input + "\\BASIS_B",
+            'BASIS_BR':  base_input + "\\BASIS_BR",
+            'D:F':       base_input + "\\D:F",
+            'B:F':       base_input + "\\B:F",
+            'MASS_D':    base_input + "\\MASS_D",
+            'MASS_B':    base_input + "\\MASS_B",
+            'MASS_RR':   base_input + "\\MASS_RR",
+            'MASS_BR':   base_input + "\\MASS_BR",
+        }
+
+        for label, path in input_paths.items():
+            try:
+                node = self.aspen.Tree.FindNode(path)
+                if node is not None:
+                    val = node.Value
+                    result['input_values'][label] = val
+                    marker = " <-- CURRENT" if val is not None and val != 0 else ""
+                    logger.info("  {} = {}{}".format(label, val, marker))
+                else:
+                    result['input_values'][label] = None
+            except Exception as e:
+                result['input_values'][label] = "ERROR: {}".format(e)
+                logger.debug("  {} -> error: {}".format(label, e))
+
+        # ────────────────────────────────────────────────────────────
+        # SECTION 3: Output Values (Actual solved values)
+        # ────────────────────────────────────────────────────────────
+        logger.info("")
+        logger.info("--- SECTION 3: Output Values (Solved) ---")
+
+        output_paths = {
+            'MOLE_RR':   base_output + "\\MOLE_RR",
+            'MOLE_DFR':  base_output + "\\MOLE_DFR",
+            'MOLE_BFR':  base_output + "\\MOLE_BFR",
+            'MOLE_BR':   base_output + "\\MOLE_BR",
+            'MASS_RR':   base_output + "\\MASS_RR",
+        }
+
+        # Also check VAR_VAL outputs (Vary block solved values)
+        for i in range(1, 6):
+            output_paths['VAR_VAL\\{}'.format(i)] = base_output + "\\VAR_VAL\\{}".format(i)
+
+        for label, path in output_paths.items():
+            try:
+                node = self.aspen.Tree.FindNode(path)
+                if node is not None:
+                    val = node.Value
+                    result['output_values'][label] = val
+                    if val is not None:
+                        logger.info("  {} = {}".format(label, val))
+                else:
+                    result['output_values'][label] = None
+            except Exception as e:
+                result['output_values'][label] = "ERROR: {}".format(e)
+                logger.debug("  {} -> error: {}".format(label, e))
+
+        # ────────────────────────────────────────────────────────────
+        # SECTION 4: Vary Block Variables (Tree Walk)
+        # ────────────────────────────────────────────────────────────
+        logger.info("")
+        logger.info("--- SECTION 4: Vary Block Variables ---")
+
+        for vary_num in range(1, max_vary + 1):
+            vary_base = "\\Data\\Blocks\\{}\\Subobjects\\Vary\\{}".format(
+                block_name, vary_num)
+
+            try:
+                vary_node = self.aspen.Tree.FindNode(vary_base)
+                if vary_node is None:
+                    continue
+            except:
+                continue
+
+            vary_info = {
+                'vary_num': vary_num,
+                'variable_paths': {},
+                'top_level_children': [],
+                'input_children_limited': [],
+            }
+
+            logger.info("  Vary Block {}:".format(vary_num))
+
+            # Step A: Walk Vary\N directly to see its top-level children
+            try:
+                if hasattr(vary_node, 'Elements') and vary_node.Elements.Count > 0:
+                    count = vary_node.Elements.Count
+                    logger.info("    Top-level children of Vary\\{} ({} nodes):".format(
+                        vary_num, count))
+                    for i in range(count):
+                        try:
+                            child = vary_node.Elements.Item(i)
+                            child_name = child.Name if hasattr(child, 'Name') else "item_{}".format(i)
+                            child_val = None
+                            try:
+                                child_val = child.Value
+                            except:
+                                child_val = "<no value>"
+                            # Also count sub-children
+                            sub_count = 0
+                            try:
+                                if hasattr(child, 'Elements'):
+                                    sub_count = child.Elements.Count
+                            except:
+                                pass
+                            vary_info['top_level_children'].append({
+                                'name': child_name,
+                                'value': child_val,
+                                'sub_count': sub_count
+                            })
+                            logger.info("      [{}] {} = {} (sub-children: {})".format(
+                                i, child_name, child_val, sub_count))
+                        except Exception as e:
+                            logger.debug("      [{}] error: {}".format(i, e))
+            except Exception as e:
+                logger.debug("    Could not walk Vary node: {}".format(e))
+
+            # Step B: Try known variable path patterns
+            variable_paths = {
+                'SENTENCE\\VARIABLE':    vary_base + "\\Input\\SENTENCE\\VARIABLE",
+                'SENTENCE\\VARIABLE\\1': vary_base + "\\Input\\SENTENCE\\VARIABLE\\1",
+                'OPT_VAR':               vary_base + "\\Input\\OPT_VAR",
+                'VARY_PARAM':            vary_base + "\\Input\\VARY_PARAM",
+                'VARIABLE':              vary_base + "\\Input\\VARIABLE",
+                'SENTENCE':              vary_base + "\\Input\\SENTENCE",
+            }
+
+            for label, path in variable_paths.items():
+                try:
+                    node = self.aspen.Tree.FindNode(path)
+                    if node is not None:
+                        val = node.Value
+                        vary_info['variable_paths'][label] = val
+                        if val is not None:
+                            logger.info("    {} = {}".format(label, val))
+                except Exception as e:
+                    vary_info['variable_paths'][label] = "ERROR: {}".format(e)
+
+            # Step C: Walk Vary\N\Input but LIMIT to first 30 children
+            # (Previous bug: this returned 5000+ items = entire block Input)
+            vary_input_path = vary_base + "\\Input"
+            try:
+                input_node = self.aspen.Tree.FindNode(vary_input_path)
+                if input_node and hasattr(input_node, 'Elements'):
+                    count = input_node.Elements.Count
+                    logger.info("    Vary\\{}\\Input has {} children".format(
+                        vary_num, count))
+                    if count > 100:
+                        logger.warning("    !!! {} children = likely resolves to Block Input (BUG) !!!".format(count))
+                        vary_info['input_note'] = "SKIPPED: {} children detected (block Input alias)".format(count)
+                    else:
+                        for i in range(min(count, 30)):
+                            try:
+                                child = input_node.Elements.Item(i)
+                                child_name = child.Name if hasattr(child, 'Name') else "item_{}".format(i)
+                                child_val = None
+                                try:
+                                    child_val = child.Value
+                                except:
+                                    child_val = "<no value>"
+                                vary_info['input_children_limited'].append({
+                                    'name': child_name,
+                                    'value': child_val
+                                })
+                                logger.info("      [{}] {} = {}".format(i, child_name, child_val))
+                            except Exception as e:
+                                logger.debug("      [{}] error: {}".format(i, e))
+            except Exception as e:
+                logger.debug("    Could not walk Vary Input tree: {}".format(e))
+
+            # Step D: Try Design-Spec-nested Vary paths
+            # In some Aspen versions, Vary config is under Design Spec subobjects
+            ds_vary_paths = {}
+            for ds_num in range(1, max_specs + 1):
+                for suffix in ['SENTENCE\\VARIABLE', 'VARIABLE', 'OPT_VAR',
+                               'LOWER', 'UPPER', 'MANIPULATED']:
+                    key = "DS{}\\Vary{}\\{}".format(ds_num, vary_num, suffix)
+                    path = "\\Data\\Blocks\\{}\\Subobjects\\Design Spec\\{}\\Subobjects\\Vary\\{}\\Input\\{}".format(
+                        block_name, ds_num, vary_num, suffix)
+                    ds_vary_paths[key] = path
+
+            found_ds_vary = {}
+            for label, path in ds_vary_paths.items():
+                try:
+                    node = self.aspen.Tree.FindNode(path)
+                    if node is not None:
+                        val = node.Value
+                        if val is not None:
+                            found_ds_vary[label] = val
+                            logger.info("    {} = {}".format(label, val))
+                except:
+                    pass
+            if found_ds_vary:
+                vary_info['design_spec_vary_paths'] = found_ds_vary
+
+            # Step E: Get bounds (try both Vary-level and block-level)
+            for extra_label in ['LOWER', 'UPPER']:
+                for suffix in ["\\Input\\{}".format(extra_label),
+                                "\\{}".format(extra_label)]:
+                    try:
+                        node = self.aspen.Tree.FindNode(vary_base + suffix)
+                        if node is not None and node.Value is not None:
+                            vary_info[extra_label.lower()] = node.Value
+                            logger.info("    {} = {} (from {})".format(
+                                extra_label, node.Value, suffix))
+                            break
+                    except:
+                        pass
+
+            # Step F: Check VARY_ACTIVE from block Input (not Vary\Input)
+            for spec_num in range(1, max_specs + 1):
+                active_path = base_input + "\\VARY_ACTIVE\\{}".format(spec_num)
+                try:
+                    node = self.aspen.Tree.FindNode(active_path)
+                    if node is not None and node.Value is not None:
+                        vary_info['active_for_spec_{}'.format(spec_num)] = node.Value
+                        logger.info("    VARY_ACTIVE\\{} = {}".format(spec_num, node.Value))
+                except:
+                    pass
+
+            result['vary_blocks'].append(vary_info)
+
+        # SECTION 4b: Walk top-level Subobjects to discover all subobject types
+        logger.info("")
+        logger.info("--- SECTION 4b: All Block Subobjects ---")
+        subobj_path = "\\Data\\Blocks\\{}\\Subobjects".format(block_name)
+        try:
+            subobj_node = self.aspen.Tree.FindNode(subobj_path)
+            if subobj_node and hasattr(subobj_node, 'Elements'):
+                count = subobj_node.Elements.Count
+                logger.info("  Subobjects ({} types):".format(count))
+                result['subobject_types'] = []
+                for i in range(count):
+                    try:
+                        child = subobj_node.Elements.Item(i)
+                        child_name = child.Name if hasattr(child, 'Name') else "type_{}".format(i)
+                        sub_count = 0
+                        try:
+                            if hasattr(child, 'Elements'):
+                                sub_count = child.Elements.Count
+                        except:
+                            pass
+                        result['subobject_types'].append({
+                            'name': child_name,
+                            'count': sub_count
+                        })
+                        logger.info("    [{}] {} ({} items)".format(i, child_name, sub_count))
+                    except Exception as e:
+                        logger.debug("    [{}] error: {}".format(i, e))
+        except Exception as e:
+            logger.debug("  Could not walk Subobjects: {}".format(e))
+
+        # ────────────────────────────────────────────────────────────
+        # SECTION 5: Design Spec Summary
+        # ────────────────────────────────────────────────────────────
+        logger.info("")
+        logger.info("--- SECTION 5: Design Specs ---")
+
+        for spec_num in range(1, max_specs + 1):
+            spec_info = self.get_design_spec_info(block_name, spec_num)
+            if spec_info:
+                spec_type = self.get_design_spec_type(block_name, spec_num)
+                spec_info['spec_type'] = spec_type
+                result['design_specs'].append(spec_info)
+                logger.info("  Spec {}: active={}, target={}, type={}".format(
+                    spec_num, spec_info.get('active'), spec_info.get('target'),
+                    spec_type))
+
+        # ────────────────────────────────────────────────────────────
+        # SECTION 6: Analysis & Warnings
+        # ────────────────────────────────────────────────────────────
+        logger.info("")
+        logger.info("--- SECTION 6: Analysis ---")
+
+        spec_indicators = result['operating_spec']
+
+        # Step 1: Determine condenser operating spec from CON_SPEC
+        # (CALC_MODE is calculation mode, NOT operating spec — exclude it)
+        con_spec = spec_indicators.get('CON_SPEC')
+        opt_spec_1 = spec_indicators.get('OPT_SPEC\\1')
+        spec_1 = spec_indicators.get('SPEC\\1')
+        calc_mode = spec_indicators.get('CALC_MODE')
+
+        active_spec = None
+        active_spec_source = None
+
+        # Priority: CON_SPEC > OPT_SPEC\1 > SPEC\1  (NOT CALC_MODE)
+        for key, val in [('CON_SPEC', con_spec), ('OPT_SPEC\\1', opt_spec_1),
+                         ('SPEC\\1', spec_1)]:
+            if val is not None and val != '' and not str(val).startswith('ERROR'):
+                active_spec = str(val)
+                active_spec_source = key
+                break
+
+        result['active_spec_type'] = active_spec
+        result['active_spec_source'] = active_spec_source
+        result['calc_mode'] = calc_mode
+
+        if active_spec:
+            logger.info("  Condenser spec: {} (from {})".format(active_spec, active_spec_source))
+        else:
+            logger.info("  CON_SPEC is null/empty — Aspen uses default condenser spec")
+            logger.info("  Default for RadFrac with condenser = Reflux Ratio (RR)")
+
+        logger.info("  Calculation mode: {}".format(calc_mode))
+
+        # Step 2: Determine if BASIS_RR is the active variable
+        # Use multiple evidence sources, not just spec name matching
+        rr_keywords = ['RR', 'MOLE-RR', 'REFLUX', 'MOLRR']
+        non_rr_keywords = ['D:F', 'D/F', 'DIST', 'MOLE-D', 'MOLE-B',
+                           'BOILUP', 'BR', 'MOLE-BR', 'BOTTOMS']
+
+        basis_rr_active = None
+
+        if active_spec:
+            spec_upper = active_spec.upper()
+            if any(kw in spec_upper for kw in rr_keywords):
+                basis_rr_active = True
+            elif any(kw in spec_upper for kw in non_rr_keywords):
+                basis_rr_active = False
+
+        # Step 3: Cross-check with RR input/output mismatch
+        basis_rr_input = result['input_values'].get('BASIS_RR')
+        mole_rr_output = result['output_values'].get('MOLE_RR')
+        rr_matches = None
+
+        if (basis_rr_input is not None and mole_rr_output is not None
+                and basis_rr_input != 0 and mole_rr_output != 0):
+            try:
+                rr_ratio = mole_rr_output / basis_rr_input
+                rr_matches = abs(rr_ratio - 1.0) <= 0.1
+                result['rr_input_output_ratio'] = round(rr_ratio, 4)
+
+                if rr_matches:
+                    logger.info("  RR consistent: Input={:.3f}, Output={:.3f} (ratio={:.2f})".format(
+                        basis_rr_input, mole_rr_output, rr_ratio))
+                else:
+                    logger.warning("  RR MISMATCH: Input BASIS_RR={:.3f}, Output MOLE_RR={:.3f} (ratio={:.2f})".format(
+                        basis_rr_input, mole_rr_output, rr_ratio))
+            except (TypeError, ZeroDivisionError):
+                pass
+
+        # Step 4: Final determination using combined evidence
+        # If CON_SPEC is null AND RR matches → default spec = RR → BASIS_RR works
+        # If CON_SPEC is null AND RR mismatches → Design Spec Vary block changed it
+        # If CON_SPEC is explicit non-RR → BASIS_RR won't work
+        if basis_rr_active is None and active_spec is None:
+            # CON_SPEC is null — check if Design Specs are active with Vary blocks
+            active_design_specs = [ds for ds in result['design_specs']
+                                   if ds.get('active') == 'YES']
+            active_vary_blocks = [vb for vb in result['vary_blocks']
+                                  if vb.get('active_for_spec_1') == 'YES'
+                                  or vb.get('active_for_spec_2') == 'YES']
+
+            if active_design_specs and active_vary_blocks:
+                # Design Specs + Vary blocks are active
+                # The column's default spec is RR (since CON_SPEC is null)
+                # BUT: Design Spec Vary blocks override BASIS_RR during convergence
+                # In forward mode (DS OFF), BASIS_RR SHOULD work
+                basis_rr_active = True
+                result['warnings'].append(
+                    "CON_SPEC is null (default=RR). {} active Design Specs with {} Vary blocks. "
+                    "In Design Spec mode, Vary blocks override BASIS_RR. "
+                    "In forward mode (DS OFF), BASIS_RR should be the active spec.".format(
+                        len(active_design_specs), len(active_vary_blocks)))
+                logger.info("  Default spec is RR. Design Specs ({}) with Vary blocks ({}) override it.".format(
+                    len(active_design_specs), len(active_vary_blocks)))
+                if rr_matches is False:
+                    logger.info("  RR mismatch confirms Vary block adjusted RR from {:.3f} to {:.3f}".format(
+                        basis_rr_input, mole_rr_output))
+            elif rr_matches is True:
+                basis_rr_active = True
+                logger.info("  RR input/output match confirms BASIS_RR is the active spec")
+            elif rr_matches is False:
+                basis_rr_active = False
+                logger.warning("  RR input/output mismatch AND no clear spec type — BASIS_RR may be ignored")
+
+        result['basis_rr_is_active'] = basis_rr_active
+
+        # Step 5: Summary
+        if basis_rr_active is True:
+            logger.info("  CONCLUSION: BASIS_RR IS the active operating spec")
+            logger.info("  set_reflux_ratio() and sweep_rr_purity() should work in forward mode")
+        elif basis_rr_active is False:
+            spec_name = active_spec if active_spec else "UNKNOWN"
+            logger.warning("  CONCLUSION: BASIS_RR is NOT the active spec (spec='{}')".format(spec_name))
+            logger.warning("  Writing to BASIS_RR will have NO EFFECT")
+            logger.warning("  sweep_rr_purity and _evaluate_with_fixed_rr WILL FAIL")
+            result['warnings'].append(
+                "BASIS_RR is NOT the active operating spec. "
+                "Active spec is '{}'. Writing to BASIS_RR will have no effect.".format(spec_name))
+        else:
+            logger.warning("  CONCLUSION: Cannot determine if BASIS_RR is active")
+            result['warnings'].append(
+                "Cannot determine if BASIS_RR is the active spec. "
+                "Check Aspen flowsheet manually.")
+
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("END DIAGNOSTIC")
+        logger.info("=" * 60)
+
+        # Save diagnostic to JSON file for post-mortem analysis
+        try:
+            import json, os
+            results_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'results')
+            os.makedirs(results_dir, exist_ok=True)
+            diag_path = os.path.join(results_dir, 'column_diag_{}.json'.format(block_name))
+            with open(diag_path, 'w') as f:
+                json.dump(result, f, indent=2, default=str)
+            logger.info("Diagnostic saved to: {}".format(diag_path))
+        except Exception as e:
+            logger.warning("Could not save diagnostic to file: {}".format(e))
+
+        return result
+
     def sweep_rr_purity(self, block_name, nt, feed, pressure, feed_stream,
                         rr_range=(0.5, 4.0), num_points=15,
-                        purity_spec=None):
+                        purity_spec=None, original_rr=None,
+                        column_diag=None):
         """
         Sweep RR values and record achieved purity at each point.
 
@@ -1135,6 +1813,14 @@ class AspenEnergyOptimizer:
             logger.error("  Use config.get_purity_spec(case_name) to get the spec")
             return []
 
+        # Guard: check if BASIS_RR is actually the active operating spec
+        if column_diag and column_diag.get('basis_rr_is_active') is False:
+            logger.error("  !!! ABORTING RR SWEEP: Column uses '{}', not reflux ratio !!!".format(
+                column_diag.get('active_spec_type')))
+            logger.error("  Writing to BASIS_RR will have no effect.")
+            logger.error("  Check Aspen flowsheet: RadFrac > Design Specs > Vary to see what variable is used.")
+            return []
+
         product_stream = purity_spec.get('stream')
         key_component = purity_spec.get('component')
         fraction_type = purity_spec.get('fraction_type', 'MASSFRAC')
@@ -1166,8 +1852,9 @@ class AspenEnergyOptimizer:
                 product_stream, key_component, fraction_type))
 
         # 1. Get calculated RR from VAR_VAL BEFORE turning off Design Specs
-        calculated_rr = self.get_reflux_ratio(block_name)
-        if calculated_rr and calculated_rr > 0:
+        calculated_rr = self.get_output_rr(block_name)
+        MAX_SANE_RR = 200  # No real distillation column operates at RR > 200
+        if calculated_rr and 0 < calculated_rr < MAX_SANE_RR:
             logger.info("  Calculated RR from Vary block: {:.3f}".format(calculated_rr))
             # Use calculated RR as center point for smart sweep range
             # Sweep ±50% around calculated RR
@@ -1177,8 +1864,12 @@ class AspenEnergyOptimizer:
             logger.info("  Smart sweep range: {:.2f} to {:.2f} (±50% of calculated RR)".format(
                 smart_rr_min, smart_rr_max))
         else:
-            logger.info("  No calculated RR found, using default range: {:.2f} to {:.2f}".format(
-                rr_range[0], rr_range[1]))
+            if calculated_rr and calculated_rr >= MAX_SANE_RR:
+                logger.warning("  Calculated RR={:.1f} is garbage (>{}), ignoring. Using default range: {:.2f} to {:.2f}".format(
+                    calculated_rr, MAX_SANE_RR, rr_range[0], rr_range[1]))
+            else:
+                logger.info("  No calculated RR found, using default range: {:.2f} to {:.2f}".format(
+                    rr_range[0], rr_range[1]))
 
         # 2. Get ALL active Design Specs and turn them OFF
         active_specs = self.get_all_design_specs(block_name, max_specs=5)
@@ -1229,19 +1920,28 @@ class AspenEnergyOptimizer:
             converged = False
 
             if success:
-                # Check convergence
                 try:
+                    # Check BLKSTAT for convergence info (but don't gate purity reading on it)
                     block_path = "\\Data\\Blocks\\{}\\Output\\BLKSTAT".format(block_name)
                     node = self.aspen.Tree.FindNode(block_path)
                     status = node.Value if node else None
 
                     if status == 0 or (isinstance(status, str) and 'OK' in str(status).upper()):
                         converged = True
-                        # Use multi-component purity for middle split columns
-                        if is_middle_split:
-                            purity = self.get_stream_multi_purity(product_stream, top_components, fraction_type)
-                        else:
-                            purity = self.get_stream_purity(product_stream, key_component, fraction_type)
+                    else:
+                        logger.debug("  BLKSTAT={} (not 0/OK, but will still read stream purity)".format(status))
+
+                    # Always read purity from stream output after successful simulation
+                    # In forward mode (Design Specs OFF), BLKSTAT may return non-zero
+                    # (warnings) but the simulation still produces valid stream results
+                    if is_middle_split:
+                        purity = self.get_stream_multi_purity(product_stream, top_components, fraction_type)
+                    else:
+                        purity = self.get_stream_purity(product_stream, key_component, fraction_type)
+
+                    # If we got a valid purity, mark as converged regardless of BLKSTAT
+                    if purity is not None and purity > 0:
+                        converged = True
                 except Exception as e:
                     logger.warning("  Error reading results: {}".format(e))
 
@@ -1269,6 +1969,11 @@ class AspenEnergyOptimizer:
         if active_spec_nums or all_vary_blocks:
             logger.info("  Restored {} Design Specs and {} Vary blocks to ACTIVE".format(
                 len(active_spec_nums), len([vb for vb in all_vary_blocks if vb['active'] == 'YES'])))
+
+        # 4b. Restore original BASIS_RR to prevent contamination of next evaluation
+        if original_rr is not None:
+            self.set_reflux_ratio(block_name, original_rr)
+            logger.info("  Restored BASIS_RR to {:.3f}".format(original_rr))
 
         # 5. Analyze results
         converged_points = [r for r in results if r['converged']]

@@ -1,203 +1,216 @@
-# Concurrent Optimization Report: Case1_COL2
+# Concurrent Optimization Report: Case1 COL2 & COL3
 ## Distillation Column Optimization - Multi-Algorithm Comparison
 
-**Generated:** January 19, 2026
-**Case:** Case1_COL2 (EB/SM Separation)
+**Generated:** February 1, 2026
+**Case:** Case1 - EB/SM Separation (COL2 & COL3)
 **Constraint:** T_reboiler <= 120°C
 
 ---
 
 ## Executive Summary
 
-Three optimization algorithms (ISO, GA, PSO) were run **concurrently** on the same case to optimize the distillation column design for minimum Total Annual Cost (TAC). All three algorithms successfully converged to similar optimal solutions, validating the robustness of the optimization framework.
+Three optimization algorithms (ISO, GA, PSO) were run on both COL2 and COL3 to optimize distillation column designs for minimum Total Annual Cost (TAC). The results show different optimal configurations for each column due to their different separation requirements.
 
-### Key Finding
-**PSO achieved the lowest TAC** at $191,393/year, followed closely by GA ($191,456/year) and ISO ($191,862/year). The difference between best and worst is only **$470/year (0.25%)**, demonstrating all algorithms found the global optimum region.
+### Key Findings
+
+**COL2 (Lighter Separation):**
+- **PSO achieved the lowest TAC** at $118,239/year with only 15 trays
+- GA and ISO converged to similar solutions around $191,500-191,850/year with 30-31 trays
+- PSO found a more aggressive design operating at the temperature constraint boundary (T_reb = 120°C)
+
+**COL3 (Heavier Separation):**
+- **GA achieved the lowest TAC** at $753,572/year
+- All algorithms converged to similar solutions (~$753,500-768,500/year)
+- Requires significantly more trays (82-91) due to more difficult separation
 
 ---
 
-## Results Comparison
+## COL2 Results Comparison
 
 | Metric | ISO | GA | PSO | Best |
 |--------|-----|----|----|------|
-| **TAC ($/year)** | 191,862 | 191,456 | **191,393** | PSO |
-| **Number of Trays (NT)** | 31 | 30 | **30** | GA/PSO |
-| **Feed Stage (NF)** | 12 | 12 | **12** | All |
-| **Pressure (bar)** | 0.325 | 0.304 | **0.301** | PSO |
-| **T_reboiler (°C)** | - | 107.6 | **107.3** | PSO |
-| **Total Evaluations** | 100 | 1,000 | 1,000 | ISO |
-| **Computation Time** | 41.4 min | **30.5 min** | 242.9 min | GA |
-| **Feasibility Rate** | 80% | **91.1%** | 84.7% | GA |
+| **TAC ($/year)** | 191,850 | 191,565 | **118,239** | PSO |
+| **Number of Trays (NT)** | 31 | 30 | **15** | PSO |
+| **Feed Stage (NF)** | 12 | 12 | 12 | All |
+| **Pressure (bar)** | 0.325 | 0.301 | **0.461** | PSO |
+| **T_reboiler (°C)** | - | 107.3 | **120.0** | GA (margin) |
+| **Total Evaluations** | 100 | 1,000 | 340 | ISO |
+| **Computation Time** | 108 min | 131 min | 994 min | ISO |
+| **Feasibility Rate** | 66% | **92%** | 55% | GA |
+
+### COL2 Cost Breakdown (PSO Best Solution)
+
+| Cost Component | Value |
+|----------------|-------|
+| Total Plant Cost (TPC) | $215,672 |
+| Capital Cost (annualized) | $71,891 |
+| Total Operating Cost (TOC) | $46,348 |
+| **Total Annual Cost (TAC)** | **$118,239** |
+
+---
+
+## COL3 Results Comparison
+
+| Metric | ISO | GA | PSO | Best |
+|--------|-----|----|----|------|
+| **TAC ($/year)** | 768,487 | **753,572** | 753,788 | GA |
+| **Number of Trays (NT)** | 91 | **84** | 82 | PSO |
+| **Feed Stage (NF)** | 42 | 37 | 36 | PSO |
+| **Pressure (bar)** | 0.156 | 0.151 | **0.142** | PSO |
+| **T_reboiler (°C)** | - | 88.1 | **86.4** | PSO |
+| **Total Evaluations** | 225 | 650 | 525 | ISO |
+| **Computation Time** | 109 min | 121 min | 258 min | ISO |
+| **Feasibility Rate** | 78% | **90%** | 86% | GA |
+
+### COL3 Cost Breakdown (GA Best Solution)
+
+| Cost Component | Value |
+|----------------|-------|
+| Total Plant Cost (TPC) | $1,313,004 |
+| Capital Cost (annualized) | $437,668 |
+| Total Operating Cost (TOC) | $315,905 |
+| **Total Annual Cost (TAC)** | **$753,572** |
 
 ---
 
 ## Detailed Algorithm Analysis
 
-### 1. Iterative Sequential Optimization (ISO)
+### COL2 Analysis
 
-**Methodology:** P → NT → NF optimization in sequence, repeated until convergence
-
+#### ISO Convergence (COL2)
 | Iteration | Pressure | NT | Feed | TAC |
 |-----------|----------|----|----- |-----|
-| 1 | 0.213 | 31 | 12 | $198,192 |
-| 2 | 0.325 | 31 | 12 | $191,862 |
-| 3 | 0.325 | 31 | 12 | $191,862 |
+| 1 | 0.213 | 31 | 12 | $198,213 |
+| 2 | 0.325 | 31 | 12 | $191,850 |
+| 3 | 0.325 | 31 | 12 | $191,850 |
 
-**Convergence:** 3 iterations (converged when TAC change < $500)
+**Note:** ISO found a local optimum with more trays. PSO discovered a different, more economical design region with fewer trays and higher pressure.
 
-**Strengths:**
-- Fastest convergence (only 100 evaluations)
-- Deterministic and reproducible
-- Clear visualization of each parameter's effect (U-curves)
+#### GA Convergence (COL2)
+```
+Gen 1:  $231,956  (initial population)
+Gen 10: $202,457  (-12.7%)
+Gen 20: $192,198  (-5.1%)
+Gen 31: $191,565  (final optimum)
+```
 
-**Weaknesses:**
-- May get trapped in local minima
-- Sequential approach may miss parameter interactions
+#### PSO Convergence (COL2)
+```
+Iter 1:  $124,729  (initial swarm)
+Iter 2:  $118,239  (final optimum - best overall!)
+```
+PSO converged very quickly to an aggressive design at the constraint boundary.
 
 ---
 
-### 2. Genetic Algorithm (GA)
+### COL3 Analysis
 
-**Configuration:** Population=20, Generations=50
+#### ISO Convergence (COL3)
+| Iteration | Pressure | NT | Feed | TAC |
+|-----------|----------|----|----- |-----|
+| 1 | 0.194 | 95 | 42 | $771,540 |
+| 2 | 0.156 | 91 | 42 | $768,487 |
+| 3 | 0.156 | 91 | 42 | $768,487 |
 
-**Convergence Profile:**
+#### GA Convergence (COL3)
 ```
-Gen 1:  $236,958  (initial population)
-Gen 5:  $213,685  (-9.8%)
-Gen 10: $200,940  (-5.9%)
-Gen 15: $193,112  (-3.9%)
-Gen 20: $192,197  (-0.5%)
-Gen 42: $191,456  (final optimum)
+Gen 1:  $770,756  (initial population)
+Gen 5:  $761,124  (-1.2%)
+Gen 9:  $760,176  (-0.1%)
+Gen 10: $753,572  (final optimum)
 ```
 
-**Strengths:**
-- Best feasibility rate (91.1%)
-- Fastest wall-clock time (30.5 min)
-- Good exploration of search space
-
-**Weaknesses:**
-- Requires more evaluations than ISO
-- Stochastic (results may vary with seed)
+#### PSO Convergence (COL3)
+```
+Iter 1:  $772,665  (initial swarm)
+Iter 2:  $759,727  (-1.7%)
+Iter 4:  $756,208  (-0.5%)
+Iter 6:  $753,788  (final optimum)
+```
 
 ---
 
-### 3. Particle Swarm Optimization (PSO)
+## Optimal Design Recommendations
 
-**Configuration:** Particles=20, Iterations=50
+### COL2 Recommended Design
 
-**Convergence Profile:**
-```
-Iter 1:  $198,119  (initial swarm)
-Iter 10: $191,471  (-3.4%)
-Iter 18: $191,451  (-0.01%)
-Iter 26: $191,393  (final optimum - best overall!)
-```
+| Parameter | Conservative | Aggressive |
+|-----------|--------------|------------|
+| **Number of Trays** | 30 | 15 |
+| **Feed Stage** | 12 | 12 |
+| **Pressure** | 0.30 bar | 0.46 bar |
+| **Expected TAC** | ~$191,500/year | ~$118,200/year |
+| **T_reboiler** | ~107°C | ~120°C |
+| **Risk Level** | Low | Higher (at constraint) |
 
-**Strengths:**
-- Found the **best solution** ($191,393)
-- Smooth convergence behavior
-- Good balance of exploration/exploitation
+**Recommendation:** The conservative design (GA solution) provides margin on the temperature constraint. The aggressive design (PSO) saves ~$73,000/year but operates at the constraint boundary.
 
-**Weaknesses:**
-- Longest computation time (242.9 min)
-- Lower feasibility rate (84.7%)
-
----
-
-## Optimal Design Recommendation
-
-Based on the concurrent optimization results, the **recommended design** is:
+### COL3 Recommended Design
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| **Number of Trays** | 30 | Consensus from GA & PSO (ISO: 31) |
-| **Feed Stage** | 12 | All algorithms agree |
-| **Pressure** | 0.30 bar | Average of GA (0.304) & PSO (0.301) |
-| **Expected TAC** | ~$191,400/year | |
-| **T_reboiler** | ~107.5°C | Well below 120°C limit |
+| **Number of Trays** | 82-84 | Consensus from GA & PSO |
+| **Feed Stage** | 36-37 | GA/PSO agree |
+| **Pressure** | 0.14-0.15 bar | Low pressure for separation |
+| **Expected TAC** | ~$753,500/year | |
+| **T_reboiler** | ~87°C | Well below 120°C limit |
 
 ---
 
-## Cost Breakdown (from GA/PSO results)
+## Algorithm Performance Summary
 
-| Cost Component | Value | Percentage |
-|----------------|-------|------------|
-| Total Plant Cost (TPC) | $338,889 - $339,212 | - |
-| Capital Cost (annualized) | $112,963 - $113,071 | 59% |
-| Total Operating Cost (TOC) | $78,322 - $78,493 | 41% |
-| **Total Annual Cost (TAC)** | **$191,393 - $191,456** | 100% |
+### Speed Comparison
+| Column | ISO | GA | PSO |
+|--------|-----|----|----|
+| COL2 | 108 min | 131 min | 994 min |
+| COL3 | 109 min | 121 min | 258 min |
 
----
+### Solution Quality
+| Column | ISO TAC | GA TAC | PSO TAC | Best |
+|--------|---------|--------|---------|------|
+| COL2 | $191,850 | $191,565 | $118,239 | PSO |
+| COL3 | $768,487 | $753,572 | $753,788 | GA |
 
-## Convergence Visualization
-
-### ISO Convergence
-The ISO method shows clear step-wise improvement:
-- **Step 1 (P-sweep):** Found optimal pressure region around 0.3 bar
-- **Step 2 (NT-sweep):** Classic U-curve showing minimum at NT=31
-- **Step 3 (NF-sweep):** Relatively flat, optimal at NF=12
-
-### GA Convergence
-Rapid initial improvement (~$45,000 reduction in first 10 generations), then gradual refinement. Converged around generation 42.
-
-### PSO Convergence
-Smooth monotonic decrease. Reached near-optimal by iteration 10, then fine-tuned pressure to reach global optimum by iteration 26.
-
----
-
-## Multi-Run Safety Validation
-
-The concurrent execution successfully demonstrated:
-
-1. **No interference between runs** - Each algorithm ran with isolated configuration
-2. **Independent results** - All three produced valid, comparable results
-3. **Resource management** - Server handled 3 simultaneous Aspen sessions
-4. **Config isolation** - `run_config_{job_id}.json` files kept parameters separate
+### Feasibility Rate
+| Column | ISO | GA | PSO |
+|--------|-----|----|----|
+| COL2 | 66% | 92% | 55% |
+| COL3 | 78% | 90% | 86% |
 
 ---
 
 ## Conclusions
 
-1. **All three algorithms are viable** for distillation column optimization
-2. **PSO found the best solution** but took the longest time
-3. **GA offers the best balance** of solution quality and speed
-4. **ISO is most efficient** for quick estimates (10x fewer evaluations)
-5. **Concurrent execution works** - multi-run safety is validated
+1. **PSO found a significantly better COL2 design** with 38% lower TAC, though at the temperature constraint boundary
+2. **GA provides consistent, reliable solutions** with the highest feasibility rates
+3. **ISO is most efficient** for quick estimates (fewest evaluations)
+4. **COL3 is more challenging** - requires 5-6x more trays than COL2 and has 4x higher TAC
+5. **Algorithm selection matters** - different algorithms found different local optima for COL2
 
 ### Recommended Algorithm Selection
 
 | Scenario | Recommended Algorithm |
 |----------|----------------------|
 | Quick estimate / sensitivity study | ISO |
-| Production optimization | GA |
-| Maximum accuracy needed | PSO |
+| Production optimization (conservative) | GA |
+| Maximum cost reduction (accept risk) | PSO |
 | Exploring new design space | GA or PSO |
 
 ---
 
 ## Files Generated
 
-### ISO Results
-- `iso_result_20260118_233618.json`
-- `Case1_COL2_ISO_Summary.png`
-- `Case1_COL2_ISO_Convergence.png`
-- `Case1_COL2_ISO_NT_UCurve.png`
-- `Case1_COL2_ISO_Feed_UCurve.png`
-- `Case1_COL2_ISO_Pressure_Sweep.png`
-- `Case1_COL2_Contour.png`
-- `Case1_COL2_UCurves_3D.png`
+### COL2 Results (Latest Run)
+- `Case1_COL2_20260127_205419/iso_result_20260127_224308.json`
+- `Case1_COL2_GA_20260128_032654/ga_result_20260128_032711.json`
+- `Case1_COL2_PSO_20260201_050541/pso_result_20260201_050559.json`
 
-### GA Results
-- `ga_result_20260118_225435.json`
-- `Case1_COL2_GA_Summary_20260118_232503.png`
-- `Case1_COL2_GA_Convergence_20260118_232503.png`
-
-### PSO Results
-- `pso_result_20260118_225609.json`
-- `Case1_COL2_PSO_Summary_20260119_025903.png`
-- `Case1_COL2_PSO_Convergence_20260119_025903.png`
+### COL3 Results (Latest Run)
+- `Case1_COL3_20260201_044435/iso_result_20260201_063350.json`
+- `Case1_COL3_GA_20260131_034640/ga_result_20260131_034654.json`
+- `Case1_COL3_PSO_20260130_204815/pso_result_20260130_204843.json`
 
 ---
 
 *Report generated by Column Optimization Dashboard*
-*Multi-Run Feature: 4 concurrent runs supported*
+*Last updated: February 1, 2026*

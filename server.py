@@ -131,6 +131,25 @@ jobs: Dict[str, Dict] = {}
 #   "logs": List[str],  # Full log lines for detailed log panel
 # }
 
+# Batch jobs store
+batches: Dict[str, Dict] = {}
+# batch structure:
+# {
+#   "batch_id": str,
+#   "case": str,
+#   "algorithm": str,
+#   "n_runs": int,
+#   "seeds": List[int],
+#   "demo": bool,
+#   "config": Dict,  # n_particles, n_iterations, etc.
+#   "status": "queued"|"running"|"done"|"failed",
+#   "current_run_index": int,  # Which run is currently executing (0-indexed)
+#   "run_ids": List[str],  # Job IDs for each run
+#   "run_results": List[Dict],  # Results for completed runs
+#   "start_time": float,
+#   "end_time": float | None,
+# }
+
 # Discord webhook URL (can be set via API or environment)
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
@@ -262,8 +281,23 @@ def _reader_thread(proc: subprocess.Popen, job_id: str, loop: asyncio.AbstractEv
         proc.stdout.close()
         proc.wait()
         jobs[job_id]["returncode"] = proc.returncode
-        jobs[job_id]["status"] = "done" if proc.returncode == 0 else "failed"
-        print(f"[READER] Process exited with code: {proc.returncode}", flush=True)
+
+        # Determine status: consider successful if result file exists or convergence history has data
+        # (even if return code is non-zero due to Aspen COM cleanup issues on Windows)
+        result_file = jobs[job_id].get("result_file")
+        has_result_file = result_file and os.path.exists(result_file)
+        has_convergence = bool(jobs[job_id].get("convergence_history"))
+
+        if proc.returncode == 0:
+            jobs[job_id]["status"] = "done"
+        elif has_result_file or has_convergence:
+            # Optimization completed but process returned non-zero (common with Aspen COM cleanup)
+            jobs[job_id]["status"] = "done"
+            print(f"[READER] Non-zero exit code ({proc.returncode}) but results exist - marking as done", flush=True)
+        else:
+            jobs[job_id]["status"] = "failed"
+
+        print(f"[READER] Process exited with code: {proc.returncode}, status: {jobs[job_id]['status']}", flush=True)
         _enqueue(loop, q, f"*** PROCESS EXIT: code={proc.returncode}")
 
         # Send Discord notification on job completion
@@ -1021,6 +1055,397 @@ async def test_discord_webhook(payload: Dict):
 
     success = send_discord_notification(test_data, webhook_url)
     return {"success": success, "message": "Test notification sent" if success else "Failed to send notification"}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# BATCH RUN ENDPOINTS
+# ════════════════════════════════════════════════════════════════════════════
+
+def _compute_batch_statistics(batch: Dict) -> Dict:
+    """Compute statistics for completed runs in a batch."""
+    completed_results = [r for r in batch.get("run_results", []) if r.get("tac") and r["tac"] < 1e10]
+
+    if not completed_results:
+        return {
+            "n_completed": 0,
+            "n_total": batch.get("n_runs", 0),
+            "tac_mean": None,
+            "tac_std": None,
+            "tac_best": None,
+            "tac_worst": None,
+            "tac_median": None,
+            "time_mean": None,
+            "time_std": None,
+            "best_config": None,
+        }
+
+    tac_values = [r["tac"] for r in completed_results]
+    time_values = [r.get("time_seconds", 0) for r in completed_results if r.get("time_seconds")]
+
+    import statistics
+
+    tac_mean = statistics.mean(tac_values) if tac_values else None
+    tac_std = statistics.stdev(tac_values) if len(tac_values) > 1 else 0
+    tac_best = min(tac_values) if tac_values else None
+    tac_worst = max(tac_values) if tac_values else None
+    tac_median = statistics.median(tac_values) if tac_values else None
+
+    time_mean = statistics.mean(time_values) if time_values else None
+    time_std = statistics.stdev(time_values) if len(time_values) > 1 else 0
+
+    # Find best config
+    best_result = min(completed_results, key=lambda r: r["tac"]) if completed_results else None
+    best_config = {
+        "nt": best_result.get("nt"),
+        "feed": best_result.get("feed"),
+        "pressure": best_result.get("pressure"),
+        "tac": best_result.get("tac"),
+        "seed": best_result.get("seed"),
+    } if best_result else None
+
+    return {
+        "n_completed": len(completed_results),
+        "n_total": batch.get("n_runs", 0),
+        "tac_mean": tac_mean,
+        "tac_std": tac_std,
+        "tac_best": tac_best,
+        "tac_worst": tac_worst,
+        "tac_median": tac_median,
+        "time_mean": time_mean,
+        "time_std": time_std,
+        "best_config": best_config,
+    }
+
+
+async def _start_batch_run(batch_id: str, run_index: int):
+    """Start a specific run within a batch (internal helper)."""
+    import time as time_module
+
+    batch = batches.get(batch_id)
+    if not batch:
+        return None
+
+    if run_index >= batch["n_runs"]:
+        # All runs completed
+        batch["status"] = "done"
+        batch["end_time"] = time_module.time()
+        return None
+
+    seed = batch["seeds"][run_index]
+
+    # Build payload for the single run
+    payload = {
+        "case": batch["case"],
+        "algorithm": batch["algorithm"],
+        "demo": batch.get("demo", False),
+        "seed": seed,
+        "n_particles": batch.get("config", {}).get("n_particles"),
+        "n_iterations": batch.get("config", {}).get("n_iterations"),
+        "config_overrides": batch.get("config_overrides"),
+    }
+
+    # Use the existing start_run logic by calling the endpoint internally
+    try:
+        result = await start_run(payload)
+        job_id = result.get("job_id")
+
+        if job_id:
+            batch["run_ids"].append(job_id)
+            batch["current_run_index"] = run_index
+
+            # Mark job as part of batch for tracking
+            if job_id in jobs:
+                jobs[job_id]["batch_id"] = batch_id
+                jobs[job_id]["batch_run_index"] = run_index
+                jobs[job_id]["seed"] = seed
+
+            return job_id
+    except Exception as e:
+        print(f"[BATCH] Error starting run {run_index} for batch {batch_id}: {e}")
+        batch["status"] = "failed"
+        return None
+
+
+def _check_batch_progress(batch_id: str):
+    """Check if current batch run is done and start next one if needed."""
+    import time as time_module
+
+    batch = batches.get(batch_id)
+    if not batch or batch["status"] not in ("running", "queued"):
+        return
+
+    current_index = batch.get("current_run_index", -1)
+    if current_index < 0:
+        return
+
+    # Check if current run is done
+    if current_index < len(batch["run_ids"]):
+        current_job_id = batch["run_ids"][current_index]
+        current_job = jobs.get(current_job_id, {})
+
+        if current_job.get("status") in ("done", "failed", "killed"):
+            # Collect result
+            seed = batch["seeds"][current_index]
+            result_entry = {
+                "run_index": current_index,
+                "seed": seed,
+                "job_id": current_job_id,
+                "status": current_job.get("status"),
+                "tac": None,
+                "nt": None,
+                "feed": None,
+                "pressure": None,
+                "time_seconds": None,
+            }
+
+            # Try to extract TAC from last_progress or result file
+            last_progress = current_job.get("last_progress", {})
+            if last_progress.get("best_tac") and last_progress["best_tac"] < 1e10:
+                result_entry["tac"] = last_progress["best_tac"]
+
+            # Try to load from result file for more details
+            result_file = current_job.get("result_file")
+            if result_file and os.path.exists(result_file):
+                try:
+                    with open(result_file, 'r') as f:
+                        result_data = json.load(f)
+                    optimal = result_data.get("optimal", {})
+                    result_entry["tac"] = optimal.get("tac", result_entry["tac"])
+                    result_entry["nt"] = optimal.get("nt")
+                    result_entry["feed"] = optimal.get("feed")
+                    result_entry["pressure"] = optimal.get("pressure")
+                    stats = result_data.get("statistics", {})
+                    result_entry["time_seconds"] = stats.get("time_seconds")
+                except Exception:
+                    pass
+
+            # Calculate elapsed time if not from result file
+            if result_entry["time_seconds"] is None and current_job.get("start_time"):
+                result_entry["time_seconds"] = round(time_module.time() - current_job["start_time"], 1)
+
+            batch["run_results"].append(result_entry)
+
+            # Check if all runs are done
+            next_index = current_index + 1
+            if next_index >= batch["n_runs"]:
+                batch["status"] = "done"
+                batch["end_time"] = time_module.time()
+                print(f"[BATCH] Batch {batch_id} completed all {batch['n_runs']} runs")
+            else:
+                # Schedule next run (will be started by the polling mechanism)
+                batch["current_run_index"] = -1  # Mark as ready for next
+                batch["_next_run_index"] = next_index
+
+
+@app.post("/batch/run")
+async def start_batch_run(payload: Dict):
+    """
+    Start a batch of optimization runs with different seeds.
+
+    JSON payload:
+      {
+        "case": "Case1_COL2",
+        "algorithm": "PSO",  # PSO or GA (not ISO)
+        "n_runs": 10,
+        "seeds": [42, 43, ...],  # Optional, auto-generates if not provided
+        "demo": true,
+        "n_particles": 20,
+        "n_iterations": 50,
+        "config_overrides": {...}
+      }
+
+    Returns batch_id for tracking progress.
+    """
+    import time as time_module
+
+    case = payload.get("case")
+    if not case:
+        raise HTTPException(status_code=400, detail="case is required")
+
+    algorithm = payload.get("algorithm", "PSO").upper()
+    if algorithm not in ("PSO", "GA"):
+        raise HTTPException(status_code=400, detail="Batch runs only support PSO or GA algorithms")
+
+    n_runs = payload.get("n_runs", 10)
+    if n_runs < 1 or n_runs > 50:
+        raise HTTPException(status_code=400, detail="n_runs must be between 1 and 50")
+
+    # Generate or use provided seeds
+    seeds = payload.get("seeds")
+    if not seeds:
+        base_seed = payload.get("base_seed", 42)
+        seeds = [base_seed + i for i in range(n_runs)]
+    elif len(seeds) != n_runs:
+        raise HTTPException(status_code=400, detail=f"seeds list length ({len(seeds)}) must match n_runs ({n_runs})")
+
+    batch_id = str(uuid.uuid4())
+
+    batches[batch_id] = {
+        "batch_id": batch_id,
+        "case": case,
+        "algorithm": algorithm,
+        "n_runs": n_runs,
+        "seeds": seeds,
+        "demo": payload.get("demo", False),
+        "config": {
+            "n_particles": payload.get("n_particles", 20),
+            "n_iterations": payload.get("n_iterations", 50),
+        },
+        "config_overrides": payload.get("config_overrides"),
+        "status": "running",
+        "current_run_index": -1,
+        "run_ids": [],
+        "run_results": [],
+        "start_time": time_module.time(),
+        "end_time": None,
+        "_next_run_index": 0,  # Internal: next run to start
+    }
+
+    # Start the first run
+    await _start_batch_run(batch_id, 0)
+
+    return {
+        "batch_id": batch_id,
+        "n_runs": n_runs,
+        "seeds": seeds,
+        "status": "running",
+    }
+
+
+@app.get("/batch/status/{batch_id}")
+async def get_batch_status(batch_id: str):
+    """Get status of a batch run including progress and intermediate statistics."""
+    import time as time_module
+
+    batch = batches.get(batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    # Check and potentially advance batch progress
+    _check_batch_progress(batch_id)
+
+    # Start next run if ready
+    next_index = batch.get("_next_run_index")
+    if next_index is not None and batch["status"] == "running" and batch["current_run_index"] == -1:
+        await _start_batch_run(batch_id, next_index)
+        batch["_next_run_index"] = None
+
+    # Build individual run status list
+    individual_runs = []
+    for i, seed in enumerate(batch["seeds"]):
+        run_status = {
+            "run_index": i,
+            "seed": seed,
+            "status": "pending",
+            "job_id": None,
+            "tac": None,
+            "elapsed_seconds": None,
+        }
+
+        if i < len(batch["run_ids"]):
+            job_id = batch["run_ids"][i]
+            run_status["job_id"] = job_id
+
+            job = jobs.get(job_id, {})
+            run_status["status"] = job.get("status", "unknown")
+
+            # Get TAC from progress
+            last_progress = job.get("last_progress", {})
+            if last_progress.get("best_tac") and last_progress["best_tac"] < 1e10:
+                run_status["tac"] = last_progress["best_tac"]
+
+            # Get elapsed time
+            if job.get("start_time"):
+                run_status["elapsed_seconds"] = round(time_module.time() - job["start_time"], 1)
+
+        # Override with completed results if available
+        for result in batch.get("run_results", []):
+            if result.get("run_index") == i:
+                run_status["status"] = result.get("status", run_status["status"])
+                run_status["tac"] = result.get("tac", run_status["tac"])
+                run_status["time_seconds"] = result.get("time_seconds")
+                break
+
+        individual_runs.append(run_status)
+
+    # Compute statistics
+    stats = _compute_batch_statistics(batch)
+
+    elapsed = None
+    if batch.get("start_time"):
+        if batch.get("end_time"):
+            elapsed = round(batch["end_time"] - batch["start_time"], 1)
+        else:
+            elapsed = round(time_module.time() - batch["start_time"], 1)
+
+    return {
+        "batch_id": batch_id,
+        "case": batch["case"],
+        "algorithm": batch["algorithm"],
+        "status": batch["status"],
+        "n_runs": batch["n_runs"],
+        "current_run_index": batch["current_run_index"],
+        "progress": f"{stats['n_completed']}/{batch['n_runs']}",
+        "elapsed_seconds": elapsed,
+        "statistics": stats,
+        "individual_runs": individual_runs,
+        "config": batch.get("config", {}),
+    }
+
+
+@app.post("/batch/stop/{batch_id}")
+async def stop_batch_run(batch_id: str):
+    """Stop a running batch and all its active jobs."""
+    batch = batches.get(batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    # Kill any running jobs in this batch
+    killed_jobs = []
+    for job_id in batch.get("run_ids", []):
+        job = jobs.get(job_id)
+        if job and job.get("status") == "running":
+            proc = job.get("process")
+            if proc and proc.poll() is None:
+                proc.terminate()
+                job["status"] = "killed"
+                killed_jobs.append(job_id)
+
+    batch["status"] = "killed"
+
+    return {
+        "batch_id": batch_id,
+        "status": "killed",
+        "killed_jobs": killed_jobs,
+    }
+
+
+@app.get("/batch/list")
+async def list_batches():
+    """List all batch runs."""
+    import time as time_module
+
+    batch_list = []
+    for bid, batch in batches.items():
+        stats = _compute_batch_statistics(batch)
+        elapsed = None
+        if batch.get("start_time"):
+            if batch.get("end_time"):
+                elapsed = round(batch["end_time"] - batch["start_time"], 1)
+            else:
+                elapsed = round(time_module.time() - batch["start_time"], 1)
+
+        batch_list.append({
+            "batch_id": bid,
+            "case": batch["case"],
+            "algorithm": batch["algorithm"],
+            "status": batch["status"],
+            "progress": f"{stats['n_completed']}/{batch['n_runs']}",
+            "tac_best": stats.get("tac_best"),
+            "elapsed_seconds": elapsed,
+        })
+
+    return {"batches": batch_list, "count": len(batch_list)}
 
 
 # ════════════════════════════════════════════════════════════════════════════
