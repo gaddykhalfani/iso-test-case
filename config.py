@@ -53,10 +53,10 @@ COLUMN_TEMPLATES = {
         'description': 'Benzene/Toluene Separation',
         'nt_bounds': (20, 45),  # Increased from 15
         'feed_bounds': (5, 30),
-        'pressure_bounds': (0.1, 0.2),
+        'pressure_bounds': (0.1, 2.0),  # Extended: was (0.1, 0.2) — no styrene in some cases
         'initial_nt': 45,
         'initial_feed': 23,
-        'initial_pressure': 0.2,
+        'initial_pressure': 0.5,
         'min_section_stages': 3,
     },
     'COL4': {
@@ -65,7 +65,7 @@ COLUMN_TEMPLATES = {
         'description': 'Light Ends Removal',
         'nt_bounds': (20, 85),  # Increased from 15
         'feed_bounds': (10, 80),
-        'pressure_bounds': (0.01, 0.1),
+        'pressure_bounds': (0.01, 0.5),  # Extended: was (0.01, 0.1) — let T_reb be the limiter
         'initial_nt': 95,
         'initial_feed': 40,
         'initial_pressure': 0.1,
@@ -77,7 +77,7 @@ COLUMN_TEMPLATES = {
         'description': 'Heavy Ends Separation',
         'nt_bounds': (20, 45),  # Increased from 15
         'feed_bounds': (5, 40),
-        'pressure_bounds': (0.5, 1.5),
+        'pressure_bounds': (0.5, 3.0),  # Extended: was (0.5, 1.5) — no styrene, unrestricted
         'initial_nt': 25,
         'initial_feed': 12,
         'initial_pressure': 1.0,
@@ -90,7 +90,9 @@ COLUMN_TEMPLATES = {
 # ════════════════════════════════════════════════════════════════════════════
 
 PURITY_SPECS = {
-    # Case 1 - Direct Sequence
+    # Case 1 - Direct Sequence (TOL → EB → SM)
+    # NOTE: has_styrene is now AUTO-DETECTED from feed stream composition
+    #       If STYRE-01 > 0.1% in feed → T_reb ≤ 120°C constraint active
     'Case1_COL2': {
         'stream': 'TOLL',
         'component': 'TOLUE-01',
@@ -241,7 +243,7 @@ class TACConfig:
     tray_spacing: float = 0.6096
     payback_period: int = 3
     cepci: float = 800
-    cepci_base: float = 500
+    cepci_base: float = 397
     operating_hours: int = 8000
 
 
@@ -564,6 +566,43 @@ DEFAULT_TAC_CONFIG = TACConfig()
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# BOUNDS TABLE (for thesis documentation)
+# ════════════════════════════════════════════════════════════════════════════
+
+def print_bounds_table():
+    """
+    Print a formatted table of all case+column bounds and constraints.
+    Useful for thesis Table X: "Design Variable Bounds per Column".
+    """
+    print("")
+    print("=" * 110)
+    print("DESIGN VARIABLE BOUNDS PER COLUMN")
+    print("=" * 110)
+    print(f"{'Case+Column':<16} {'Description':<25} {'NT bounds':^12} {'NF bounds':^12} {'P bounds (bar)':^16} {'Styrene?':^10} {'T_reb limit':^12}")
+    print("-" * 110)
+
+    for seq in sorted(SEQUENCE_FILES.keys()):
+        for col in sorted(COLUMN_TEMPLATES.keys()):
+            case_key = f"{seq}_{col}"
+            template = COLUMN_TEMPLATES[col]
+
+            # has_styrene is now auto-detected from feed stream at runtime
+            sty_str = "AUTO"
+            t_limit = "auto-detect"
+
+            # Only print if purity spec exists for this case+column
+            if case_key in PURITY_SPECS:
+                print(f"{case_key:<16} {template['description']:<25} "
+                      f"{str(template['nt_bounds']):^12} "
+                      f"{str(template['feed_bounds']):^12} "
+                      f"{str(template['pressure_bounds']):^16} "
+                      f"{sty_str:^10} {t_limit:^12}")
+
+    print("=" * 110)
+    print("")
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # TESTING
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -571,11 +610,14 @@ if __name__ == "__main__":
     print("=" * 70)
     print("CONFIGURATION MODULE - Sequential Parametric Optimizer")
     print("=" * 70)
-    
+
     print("\nAvailable Cases:")
     for case in list_available_cases():
         print(f"  - {case}")
-    
+
+    # Print bounds table (for thesis)
+    print_bounds_table()
+
     print("\n" + "-" * 70)
     print("Example: Case1_COL2")
     print("-" * 70)

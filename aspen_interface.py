@@ -247,7 +247,7 @@ class AspenEnergyOptimizer:
             
         except Exception as e:
             logger.error("Error getting energy results: {}".format(e))
-            return 0.0, 0.0
+            return None, None
     
     def get_diameter(self, block_name):
         """
@@ -706,6 +706,107 @@ class AspenEnergyOptimizer:
             logger.debug("Could not read SPEC_TYPE for spec {}: {}".format(spec_num, e))
         return None
 
+    def auto_detect_styrene_in_reboiler(self, block_name, threshold=0.01):
+        """
+        Auto-detect if styrene monomer (STYRE-01) is present in the reboiler.
+
+        Reads the liquid mole fraction of STYRE-01 at the last stage (reboiler)
+        from the most recent simulation output. Used to determine whether the
+        T_reb ≤ 120°C polymerization constraint should apply to this column.
+
+        Parameters
+        ----------
+        block_name : str
+            Name of the RadFrac block (e.g., 'COL2')
+        threshold : float
+            Minimum mole fraction to consider styrene "present" (default: 0.01 = 1%)
+
+        Returns
+        -------
+        bool : True if STYRE-01 mole fraction > threshold at reboiler stage
+        """
+        try:
+            # Read NSTAGE from output (actual number of stages after simulation)
+            nstage_path = "\\Data\\Blocks\\{}\\Output\\NSTAGE".format(block_name)
+            node = self.aspen.Tree.FindNode(nstage_path)
+            if node and node.Value:
+                nstage = int(node.Value)
+            else:
+                # Fallback: read from input
+                nstage_path = "\\Data\\Blocks\\{}\\Input\\NSTAGE".format(block_name)
+                node = self.aspen.Tree.FindNode(nstage_path)
+                if node and node.Value:
+                    nstage = int(node.Value)
+                else:
+                    logger.warning("  [Styrene detect] Cannot read NSTAGE for {}".format(block_name))
+                    return True  # Conservative: assume styrene present
+
+            # Read liquid mole fraction of STYRE-01 at last stage (reboiler)
+            # Try multiple possible Aspen output paths
+            styrene_paths = [
+                "\\Data\\Blocks\\{}\\Output\\X\\{}\\STYRE-01".format(block_name, nstage),
+                "\\Data\\Blocks\\{}\\Output\\MOLE_FRAC\\{}\\STYRE-01".format(block_name, nstage),
+            ]
+
+            for path in styrene_paths:
+                try:
+                    node = self.aspen.Tree.FindNode(path)
+                    if node and node.Value is not None:
+                        x_styrene = float(node.Value)
+                        has_styrene = x_styrene > threshold
+                        logger.info("  [Styrene detect] {}: STYRE-01 x={:.6f} at stage {} -> {}".format(
+                            block_name, x_styrene, nstage,
+                            "HAS STYRENE (T_reb constraint active)" if has_styrene else "NO STYRENE"))
+                        return has_styrene
+                except Exception:
+                    continue
+
+            # If STYRE-01 not found at all, it may not exist in this simulation
+            logger.info("  [Styrene detect] {}: STYRE-01 not found in stage output -> NO STYRENE".format(block_name))
+            return False
+
+        except Exception as e:
+            logger.warning("  [Styrene detect] Error for {}: {} -> assuming styrene present (conservative)".format(
+                block_name, e))
+            return True  # Conservative default
+
+    def auto_detect_styrene_in_feed(self, feed_stream, threshold=0.001):
+        """
+        Auto-detect if styrene monomer (STYRE-01) is present in the column's feed.
+
+        If styrene is in the feed, it is present somewhere in the column and
+        could polymerize on hot stages. The T_reb <= 120C constraint should
+        apply to any column that processes styrene, not just columns where
+        styrene ends up in the reboiler.
+
+        Parameters
+        ----------
+        feed_stream : str
+            Name of the feed stream (e.g., 'LIQPROD1', 'LIQPROD2')
+        threshold : float
+            Minimum mass fraction to consider styrene "present" (default: 0.001 = 0.1%)
+
+        Returns
+        -------
+        bool : True if STYRE-01 mass fraction > threshold in feed stream
+        """
+        try:
+            x_styrene = self.get_stream_purity(feed_stream, 'STYRE-01', 'MASSFRAC')
+            if x_styrene is not None:
+                has_styrene = x_styrene > threshold
+                logger.info("  [Styrene detect] Feed stream '{}': STYRE-01 = {:.6f} -> {}".format(
+                    feed_stream, x_styrene,
+                    "HAS STYRENE (T_reb constraint active)" if has_styrene else "NO STYRENE"))
+                return has_styrene
+            else:
+                logger.info("  [Styrene detect] Feed stream '{}': STYRE-01 not found -> NO STYRENE".format(
+                    feed_stream))
+                return False
+        except Exception as e:
+            logger.warning("  [Styrene detect] Error reading feed '{}': {} -> assuming styrene present".format(
+                feed_stream, e))
+            return True  # Conservative default
+
     def auto_detect_purity_target(self, block_name):
         """
         Auto-detect the purity Design Spec target from the Aspen block.
@@ -763,7 +864,7 @@ class AspenEnergyOptimizer:
 
         # Case 2: Could not identify by type - use heuristic (lower target = purity)
         if len(specs) >= 2:
-            sorted_specs = sorted(specs, key=lambda s: s['target'] if s['target'] else 1.0)
+            sorted_specs = sorted(specs, key=lambda s: s['target'] if s['target'] is not None else 1.0)
             chosen = sorted_specs[0]
             logger.warning("  -> Could not identify spec types, using heuristic (lowest target)")
             logger.warning("     Selected Spec {} (target={}) as purity spec".format(
@@ -1856,13 +1957,14 @@ class AspenEnergyOptimizer:
         MAX_SANE_RR = 200  # No real distillation column operates at RR > 200
         if calculated_rr and 0 < calculated_rr < MAX_SANE_RR:
             logger.info("  Calculated RR from Vary block: {:.3f}".format(calculated_rr))
-            # Use calculated RR as center point for smart sweep range
-            # Sweep ±50% around calculated RR
-            smart_rr_min = max(0.3, calculated_rr * 0.5)
+            # Start sweep LOW to find minimum viable RR (creates proper U-curve).
+            # Use 10% of calculated RR as lower bound so we explore low RR values
+            # where different NT configs need different minimum RR.
+            smart_rr_min = max(0.5, calculated_rr * 0.1)
             smart_rr_max = calculated_rr * 1.5
             rr_range = (smart_rr_min, smart_rr_max)
-            logger.info("  Smart sweep range: {:.2f} to {:.2f} (±50% of calculated RR)".format(
-                smart_rr_min, smart_rr_max))
+            logger.info("  Smart sweep range: {:.2f} to {:.2f} (10%-150% of calculated RR={:.2f})".format(
+                smart_rr_min, smart_rr_max, calculated_rr))
         else:
             if calculated_rr and calculated_rr >= MAX_SANE_RR:
                 logger.warning("  Calculated RR={:.1f} is garbage (>{}), ignoring. Using default range: {:.2f} to {:.2f}".format(

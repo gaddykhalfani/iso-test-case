@@ -431,7 +431,7 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
     tac_calc = TACCalculator(
         material='SS',
         cepci=800,
-        cepci_base=500,
+        cepci_base=397,
         operating_hours=8000,
         payback_period=3,
     )

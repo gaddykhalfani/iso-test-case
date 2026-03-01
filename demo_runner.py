@@ -116,11 +116,13 @@ result_filename = f"{algorithm.lower()}_result_{timestamp}.json"
 outfile = os.path.join(results_dir, result_filename)
 
 result_data = {
+    "is_demo": True,
     "metadata": {
         "case_name": f"demo_{job_id}",
         "algorithm": algorithm,
         "methodology": f"Demo {algorithm} Optimization",
         "temperature_constraint": "T_reb <= 120C",
+        "is_demo": True,
     },
     "optimal": optimal,
     "convergence": {

@@ -532,11 +532,10 @@ Time: {stats.get('time_seconds', 0):.1f} seconds
 
         n_designs = len(designs)
 
-        # Create 2-panel figure
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8),
-                                        gridspec_kw={'width_ratios': [1.2, 1]})
+        # Create single-panel figure (scatter plot only, summary as text)
+        fig, ax1 = plt.subplots(1, 1, figsize=(10, 7))
 
-        # LEFT: Heatmap scatter (NT vs NF, color=purity, size=pressure)
+        # Heatmap scatter (NT vs NF, color=purity, size=pressure)
         nts = [d['nt'] for d in designs]
         nfs = [d['nf'] for d in designs]
         purities = [d['max_purity'] for d in designs]
@@ -550,8 +549,9 @@ Time: {stats.get('time_seconds', 0):.1f} seconds
             sizes = [150] * len(pressures)
 
         scatter = ax1.scatter(nts, nfs, c=purities, s=sizes, cmap='RdYlGn',
-                              alpha=0.8, edgecolors='black', linewidths=0.5)
-        cbar = plt.colorbar(scatter, ax=ax1)
+                              alpha=0.8, edgecolors='black', linewidths=0.5,
+                              rasterized=True)
+        cbar = fig.colorbar(scatter, ax=ax1)
         cbar.set_label('Max Purity Achieved', fontsize=11)
 
         # Add target line on colorbar if within range
@@ -560,9 +560,15 @@ Time: {stats.get('time_seconds', 0):.1f} seconds
             cbar_max = max(purities)
             if cbar_min <= purity_target <= cbar_max:
                 cbar.ax.axhline(y=purity_target, color='red', linestyle='--', linewidth=2)
-            cbar.ax.text(1.05, purity_target, f'Target\n{purity_target:.3f}',
-                        transform=cbar.ax.get_yaxis_transform(),
-                        fontsize=8, color='red', va='center')
+                cbar.ax.text(1.05, purity_target, f'Target\n{purity_target:.3f}',
+                            transform=cbar.ax.get_yaxis_transform(),
+                            fontsize=8, color='red', va='center')
+            else:
+                # Target outside colorbar range — show as title annotation instead
+                ax1.annotate(f'Purity Target: {purity_target:.4f}',
+                            xy=(0.5, 1.0), xycoords='axes fraction',
+                            fontsize=9, color='red', ha='center',
+                            xytext=(0, -5), textcoords='offset points')
 
         ax1.set_xlabel('Number of Trays (NT)', fontsize=12)
         ax1.set_ylabel('Feed Stage (NF)', fontsize=12)
@@ -572,98 +578,53 @@ Time: {stats.get('time_seconds', 0):.1f} seconds
 
         # Add legend for pressure scale
         if p_max > p_min:
+            from matplotlib.lines import Line2D
             legend_elements = [
-                plt.scatter([], [], s=100, c='gray', alpha=0.6, label=f'P = {p_min:.2f} bar'),
-                plt.scatter([], [], s=200, c='gray', alpha=0.6, label=f'P = {(p_min+p_max)/2:.2f} bar'),
-                plt.scatter([], [], s=300, c='gray', alpha=0.6, label=f'P = {p_max:.2f} bar'),
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                       markersize=8, alpha=0.6, label=f'P = {p_min:.2f} bar'),
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                       markersize=11, alpha=0.6, label=f'P = {(p_min+p_max)/2:.2f} bar'),
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                       markersize=14, alpha=0.6, label=f'P = {p_max:.2f} bar'),
             ]
             ax1.legend(handles=legend_elements, loc='upper right', fontsize=9, framealpha=0.9)
 
-        # RIGHT: Summary table
+        # Add summary text box (replaces expensive matplotlib table)
         designs_sorted = sorted(designs, key=lambda x: x['max_purity'], reverse=True)
-        top_n = designs_sorted[:8]
-        bottom_n = designs_sorted[-4:] if len(designs_sorted) > 12 else []
+        top_3 = designs_sorted[:3]
 
-        table_data = []
-        for i, d in enumerate(top_n):
-            gap = purity_target - d['max_purity'] if purity_target else 0
-            table_data.append([
-                i + 1,
-                d['nt'],
-                d['nf'],
-                f"{d['pressure']:.2f}",
-                f"{d['max_purity']:.4f}",
-                f"{d['best_rr']:.2f}" if d['best_rr'] else "N/A",
-                f"{gap:.4f}" if purity_target else "-"
-            ])
-
-        if bottom_n:
-            table_data.append(['...', '...', '...', '...', '...', '...', '...'])
-            for d in bottom_n:
-                gap = purity_target - d['max_purity'] if purity_target else 0
-                table_data.append([
-                    '',
-                    d['nt'],
-                    d['nf'],
-                    f"{d['pressure']:.2f}",
-                    f"{d['max_purity']:.4f}",
-                    f"{d['best_rr']:.2f}" if d['best_rr'] else "N/A",
-                    f"{gap:.4f}" if purity_target else "-"
-                ])
-
-        ax2.axis('off')
-        table = ax2.table(
-            cellText=table_data,
-            colLabels=['Rank', 'NT', 'NF', 'P(bar)', 'Max Purity', 'Best RR', 'Gap'],
-            loc='center',
-            cellLoc='center'
-        )
-        table.auto_set_font_size(False)
-        table.set_fontsize(9)
-        table.scale(1.2, 1.5)
-
-        # Style table header
-        for j in range(7):
-            table[(0, j)].set_facecolor('#4472C4')
-            table[(0, j)].set_text_props(color='white', fontweight='bold')
-
-        # Color code rows by purity
-        for i, row_data in enumerate(table_data):
-            if row_data[0] == '...':
-                for j in range(7):
-                    table[(i + 1, j)].set_facecolor('#f0f0f0')
-            elif row_data[0] != '':
-                # Top designs - lighter green
-                for j in range(7):
-                    table[(i + 1, j)].set_facecolor('#e6f3e6')
-            else:
-                # Bottom designs - lighter red
-                for j in range(7):
-                    table[(i + 1, j)].set_facecolor('#f9e6e6')
-
-        title_text = f'Summary: Top 8 + Bottom 4 Infeasible Designs'
+        summary_lines = [f'Total Infeasible: {n_designs}']
+        summary_lines.append(f'Best Purity: {max(purities):.4f} | Worst: {min(purities):.4f}')
         if purity_target:
-            title_text += f'\nTarget Purity: {purity_target:.4f}'
-        ax2.set_title(title_text, fontsize=12, fontweight='bold', pad=20)
+            summary_lines.append(f'Target: {purity_target:.4f}')
+        summary_lines.append('')
+        summary_lines.append('Top 3 Designs:')
+        for i, d in enumerate(top_3):
+            gap_str = f', Gap={purity_target - d["max_purity"]:.4f}' if purity_target else ''
+            summary_lines.append(
+                f'  {i+1}. NT={d["nt"]}, NF={d["nf"]}, P={d["pressure"]:.2f}, '
+                f'Pur={d["max_purity"]:.4f}{gap_str}'
+            )
 
-        # Add statistics text below table
-        stats_text = f'Total Infeasible: {n_designs} | Best: {max(purities):.4f} | Worst: {min(purities):.4f}'
-        ax2.text(0.5, 0.05, stats_text, transform=ax2.transAxes,
-                fontsize=10, ha='center', style='italic',
-                bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+        summary_text = '\n'.join(summary_lines)
+        ax1.text(0.02, 0.02, summary_text, transform=ax1.transAxes,
+                fontsize=8, fontfamily='monospace', va='bottom',
+                bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow',
+                         alpha=0.9, edgecolor='gray'))
 
-        plt.tight_layout()
+        fig.tight_layout()
 
         if save:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = os.path.join(self.output_dir,
                                    f"{case_name}_{algorithm}_Infeasible_Heatmap_{timestamp}.png")
-            plt.savefig(filename, dpi=150, bbox_inches='tight')
+            fig.savefig(filename, dpi=150, bbox_inches='tight',
+                        facecolor='white', edgecolor='none')
             logger.info(f"Saved Infeasible Heatmap + Table plot: {filename}")
-            plt.close()
+            plt.close(fig)
             return filename
 
-        plt.close()
+        plt.close(fig)
         return None
 
 

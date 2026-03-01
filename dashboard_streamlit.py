@@ -940,10 +940,12 @@ def render_combined_convergence_chart():
     """Render a combined convergence chart showing all active/recent runs."""
     conv_data = get_all_convergence()
     if not conv_data or not conv_data.get("jobs"):
+        st.info("No convergence data available yet. Start a run to see the chart.")
         return
 
     jobs_with_data = [j for j in conv_data["jobs"] if j.get("convergence_history")]
     if not jobs_with_data:
+        st.info("Waiting for convergence data from running jobs...")
         return
 
     st.markdown("""

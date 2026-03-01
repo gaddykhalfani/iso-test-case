@@ -215,6 +215,21 @@ ALGORITHM_SCRIPTS = {
     "GA": "ga_optimizer.py",
 }
 
+
+def _is_demo_result(data: dict) -> bool:
+    """Check if a result JSON is from a demo run (not a real Aspen optimization)."""
+    # Check top-level is_demo flag (new format)
+    if data.get("is_demo"):
+        return True
+    # Check metadata is_demo flag
+    if data.get("metadata", {}).get("is_demo"):
+        return True
+    # Check case_name prefix (legacy demo results without flag)
+    case_name = data.get("metadata", {}).get("case_name", data.get("case_name", ""))
+    if case_name.startswith("demo_"):
+        return True
+    return False
+
 def _enqueue(loop, q: asyncio.Queue, item: str):
     """Schedule putting item into asyncio.Queue from any thread."""
     asyncio.run_coroutine_threadsafe(q.put(item), loop)
@@ -679,7 +694,7 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
 
 @app.get("/results")
 async def list_results():
-    """List all result JSON files in the results directory."""
+    """List all result JSON files in the results directory (excludes demo runs)."""
     results = []
     json_files = glob.glob(os.path.join(RESULTS_DIR, "*.json"))
 
@@ -688,6 +703,12 @@ async def list_results():
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+
+            # Skip run config files and demo results
+            if "run_config" in filename:
+                continue
+            if _is_demo_result(data):
+                continue
 
             # Extract summary info
             optimal = data.get('optimal', {})
@@ -847,8 +868,10 @@ async def get_statistics():
             with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
-            # Skip run config files
+            # Skip run config files and demo results
             if "run_config" in os.path.basename(filepath):
+                continue
+            if _is_demo_result(data):
                 continue
 
             stats["total_runs"] += 1
@@ -959,6 +982,10 @@ async def export_results_csv():
 
             with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+
+            # Skip demo results
+            if _is_demo_result(data):
+                continue
 
             optimal = data.get('optimal', {})
             metadata = data.get('metadata', {})

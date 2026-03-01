@@ -96,10 +96,12 @@ class ISOVisualizer:
         """
         Plot pressure sweep with temperature constraint visualization.
         Marks infeasible points where T_reb > 120°C in RED.
+        Only shows constraint when has_styrene=True.
         """
         if not optimizer.iterations:
             return None
-        
+
+        has_styrene = getattr(optimizer, 'has_styrene', True)
         iter_result = optimizer.iterations[iteration]
         points = iter_result.pressure_sweep.points
         
@@ -113,7 +115,7 @@ class ISOVisualizer:
         for pt in points:
             p = safe_get(pt, 'pressure')
             tac = safe_get(pt, 'tac', 1e12)
-            T_reb = safe_get(pt, 'T_reb', 0)
+            T_reb = safe_get(pt, 'T_reb', None)
             feasibility = safe_get(pt, 'feasibility', FeasibilityStatus.FEASIBLE)
             
             if hasattr(feasibility, 'value'):
@@ -142,9 +144,10 @@ class ISOVisualizer:
                        marker='^', color=self.colors['infeasible_temp'], s=100,
                        label=f'Infeasible (T_reb > {T_REBOILER_MAX}°C)', zorder=5)
             for p, T in zip(p_infeasible, T_infeasible):
-                ax1.annotate(f'{T:.0f}°C', (p, y_pos),
-                           textcoords="offset points", xytext=(0, 10),
-                           ha='center', fontsize=9, color='red')
+                if T is not None and T > 0:
+                    ax1.annotate(f'{T:.0f}°C', (p, y_pos),
+                               textcoords="offset points", xytext=(0, 10),
+                               ha='center', fontsize=9, color='red')
         
         opt_p = iter_result.optimal_pressure
         if p_feasible:
@@ -173,27 +176,49 @@ class ISOVisualizer:
         ax1.legend(loc='upper right', fontsize=10)
         ax1.grid(True, alpha=0.3)
         
-        # BOTTOM: Temperature vs Pressure
-        all_p = [safe_get(pt, 'pressure') for pt in points]
-        all_T = [safe_get(pt, 'T_reb', 0) for pt in points]
-        
-        ax2.plot(all_p, all_T, 's-', color='#d62728', linewidth=2, markersize=8,
-                label='T_reboiler')
-        ax2.axhline(y=T_REBOILER_MAX, color='red', linestyle='--', linewidth=2,
-                   label=f'Constraint: T_reb ≤ {T_REBOILER_MAX}°C')
-        ax2.fill_between(ax2.get_xlim(), T_REBOILER_MAX, max(all_T) * 1.1,
-                        color='red', alpha=0.1, label='Infeasible region')
-        
+        # BOTTOM: Temperature vs Pressure (only points with valid T_reb)
+        valid_pairs = [
+            (safe_get(pt, 'pressure'), safe_get(pt, 'T_reb'))
+            for pt in points
+            if safe_get(pt, 'T_reb') is not None and safe_get(pt, 'T_reb') > 0
+        ]
+
+        if valid_pairs:
+            valid_p, valid_T = zip(*valid_pairs)
+            ax2.plot(valid_p, valid_T, 's-', color='#d62728', linewidth=2, markersize=8,
+                    label='T_reboiler')
+            T_max_val = max(valid_T)
+        else:
+            valid_p, valid_T = [], []
+            T_max_val = T_REBOILER_MAX + 20
+
+        if has_styrene:
+            # Show constraint line and infeasible region
+            ax2.axhline(y=T_REBOILER_MAX, color='red', linestyle='--', linewidth=2,
+                       label=f'Constraint: T_reb ≤ {T_REBOILER_MAX}°C')
+            ax2.fill_between(ax2.get_xlim(), T_REBOILER_MAX, max(T_max_val * 1.1, T_REBOILER_MAX + 10),
+                            color='red', alpha=0.1, label='Infeasible region')
+            ax2.set_title('Temperature Constraint Check', fontsize=12, fontweight='bold')
+
+            all_pressures = [safe_get(pt, 'pressure') for pt in points if safe_get(pt, 'pressure') is not None]
+            if all_pressures:
+                ax2.annotate('STYRENE POLYMERIZATION RISK\nT > 120°C',
+                            xy=(min(all_pressures) + 0.1, T_REBOILER_MAX + 5),
+                            fontsize=10, color='red', fontweight='bold',
+                            bbox=dict(boxstyle='round', facecolor='mistyrose', alpha=0.9))
+        else:
+            # No styrene — constraint inactive, just show T_reb for reference
+            ax2.set_title('Reboiler Temperature (no styrene — constraint inactive)',
+                         fontsize=12, fontweight='bold')
+            ax2.annotate('T_reb constraint INACTIVE\n(no styrene in reboiler)',
+                        xy=(0.5, 0.9), xycoords='axes fraction', ha='center',
+                        fontsize=10, color='green', fontweight='bold',
+                        bbox=dict(boxstyle='round', facecolor='honeydew', alpha=0.9))
+
         ax2.set_xlabel('Operating Pressure (bar)', fontsize=12)
         ax2.set_ylabel('Reboiler Temperature (°C)', fontsize=12)
-        ax2.set_title('Temperature Constraint Check', fontsize=12, fontweight='bold')
         ax2.legend(loc='upper left', fontsize=10)
         ax2.grid(True, alpha=0.3)
-        
-        ax2.annotate('STYRENE POLYMERIZATION RISK\nT > 120°C',
-                    xy=(min(all_p) + 0.1, T_REBOILER_MAX + 5),
-                    fontsize=10, color='red', fontweight='bold',
-                    bbox=dict(boxstyle='round', facecolor='mistyrose', alpha=0.9))
         
         plt.tight_layout()
         
@@ -892,7 +917,24 @@ class ISOVisualizer:
     # ════════════════════════════════════════════════════════════════════════
     # SUMMARY DASHBOARD
     # ════════════════════════════════════════════════════════════════════════
-    
+
+    def _collect_infeasible(self, points, x_key):
+        """Collect infeasible points from a sweep for plotting markers."""
+        temp_xs = []
+        conv_xs = []
+        for pt in points:
+            x_val = safe_get(pt, x_key)
+            if x_val is None:
+                continue
+            feasibility = safe_get(pt, 'feasibility', 'feasible')
+            if hasattr(feasibility, 'value'):
+                feasibility = feasibility.value
+            if 'temperature' in str(feasibility):
+                temp_xs.append(x_val)
+            elif 'convergence' in str(feasibility):
+                conv_xs.append(x_val)
+        return temp_xs, conv_xs
+
     def plot_summary(self, optimizer, case_name: str) -> str:
         """Create ISO summary dashboard."""
         result = optimizer.result
@@ -928,13 +970,18 @@ class ISOVisualizer:
         # Method box
         ax_method = fig.add_subplot(gs[0, 1])
         ax_method.axis('off')
+        has_styrene = getattr(optimizer, 'has_styrene', True)
+        if has_styrene:
+            constraint_line = f"(T_reb <= {T_REBOILER_MAX:.0f} C)"
+        else:
+            constraint_line = "(no T_reb constraint)"
         method_text = f"""
 ╔══════════════════════════════════╗
 ║     ISO METHODOLOGY               ║
 ╠══════════════════════════════════╣
 ║  OUTER LOOP:                      ║
 ║  ├─ Step 1: Optimize P            ║
-║  │   (T_reb ≤ {T_REBOILER_MAX:.0f}°C)             ║
+║  │   {constraint_line:<30}║
 ║  ├─ Step 2: Optimize NT           ║
 ║  └─ Step 3: Optimize NF           ║
 ║  CHECK: Design unchanged?         ║
@@ -975,6 +1022,19 @@ class ISOVisualizer:
                 ps, tacs = zip(*p_data)
                 ax_p.plot(ps, tacs, 'o-', color=self.colors['pressure'], linewidth=2)
                 ax_p.axvline(x=result.optimal_pressure, color='red', linestyle='--')
+                # Infeasible markers
+                temp_xs, conv_xs = self._collect_infeasible(points, 'pressure')
+                y_top = max(tacs) * 1.05
+                if temp_xs:
+                    ax_p.scatter(temp_xs, [y_top]*len(temp_xs), marker='x',
+                                color=self.colors['infeasible_temp'], s=60, zorder=8,
+                                label='T_reb>{:.0f}°C'.format(T_REBOILER_MAX))
+                if conv_xs:
+                    ax_p.scatter(conv_xs, [y_top]*len(conv_xs), marker='x',
+                                color=self.colors['infeasible_conv'], s=40, zorder=7,
+                                label='No conv.')
+                if temp_xs or conv_xs:
+                    ax_p.legend(fontsize=7, loc='upper right')
             ax_p.set_xlabel('Pressure (bar)')
             ax_p.set_ylabel('TAC (×$1k/yr)')
             ax_p.set_title('Step 1: P Sweep', fontweight='bold')
@@ -989,6 +1049,18 @@ class ISOVisualizer:
                 nts, tacs = zip(*nt_data)
                 ax_nt.plot(nts, tacs, 's-', color=self.colors['nt'], linewidth=2)
                 ax_nt.axvline(x=result.optimal_nt, color='red', linestyle='--')
+                # Infeasible markers
+                temp_xs, conv_xs = self._collect_infeasible(points, 'nt')
+                y_top = max(tacs) * 1.05
+                if temp_xs:
+                    ax_nt.scatter(temp_xs, [y_top]*len(temp_xs), marker='x',
+                                 color=self.colors['infeasible_temp'], s=60, zorder=8)
+                if conv_xs:
+                    ax_nt.scatter(conv_xs, [y_top]*len(conv_xs), marker='x',
+                                 color=self.colors['infeasible_conv'], s=40, zorder=7,
+                                 label='No conv.')
+                if conv_xs or temp_xs:
+                    ax_nt.legend(fontsize=7, loc='upper right')
             ax_nt.set_xlabel('Number of Stages (NT)')
             ax_nt.set_ylabel('TAC (×$1k/yr)')
             ax_nt.set_title('Step 2: NT Sweep', fontweight='bold')
@@ -1003,6 +1075,18 @@ class ISOVisualizer:
                 feeds, tacs = zip(*feed_data)
                 ax_feed.plot(feeds, tacs, '^-', color=self.colors['feed'], linewidth=2)
                 ax_feed.axvline(x=result.optimal_feed, color='red', linestyle='--')
+                # Infeasible markers
+                temp_xs, conv_xs = self._collect_infeasible(points, 'feed')
+                y_top = max(tacs) * 1.05
+                if temp_xs:
+                    ax_feed.scatter(temp_xs, [y_top]*len(temp_xs), marker='x',
+                                   color=self.colors['infeasible_temp'], s=60, zorder=8)
+                if conv_xs:
+                    ax_feed.scatter(conv_xs, [y_top]*len(conv_xs), marker='x',
+                                   color=self.colors['infeasible_conv'], s=40, zorder=7,
+                                   label='No conv.')
+                if conv_xs or temp_xs:
+                    ax_feed.legend(fontsize=7, loc='upper right')
             ax_feed.set_xlabel('Feed Stage (NF)')
             ax_feed.set_ylabel('TAC (×$1k/yr)')
             ax_feed.set_title('Step 3: NF Sweep', fontweight='bold')

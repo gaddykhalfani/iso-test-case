@@ -720,7 +720,42 @@ class TACEvaluator:
                 tac_result, fwd_Q_reb, fwd_Q_cond, fwd_diameter, nt, feed, pressure,
                 fwd_T_cond, fwd_T_reb, vacuum_sys
             )
-            # Soft feasible - forward mode only
+
+            # ════════════════════════════════════════════════════════════════
+            # STEP 8b: VALIDATE FORWARD-MODE PURITY
+            # Check if forward mode achieves target specs. Log the result
+            # but keep as SOFT feasible — forward-mode Q_reb is systematically
+            # lower than Design Spec mode, so mixing them causes false dips.
+            # The optimizer uses soft feasible as fallback when no hard feasible
+            # exists (e.g., dual MASS-RECOV columns like Case9_COL2).
+            # ════════════════════════════════════════════════════════════════
+            if purity_spec:
+                achieved_purity = None
+                is_ms = purity_spec.get('is_middle_split', False)
+                p_stream = purity_spec.get('stream')
+                frac_type = purity_spec.get('fraction_type', 'MASSFRAC')
+
+                if is_ms:
+                    top_comps = purity_spec.get('top_components', [])
+                    if top_comps and p_stream:
+                        achieved_purity = self.aspen.get_stream_multi_purity(p_stream, top_comps, frac_type)
+                else:
+                    key_comp = purity_spec.get('component')
+                    if key_comp and p_stream:
+                        achieved_purity = self.aspen.get_stream_purity(p_stream, key_comp, frac_type)
+
+                fwd_target = purity_spec.get('target') or 0.99
+
+                if achieved_purity is not None and achieved_purity >= fwd_target:
+                    result['validated_forward_mode'] = True
+                    logger.info("  [RR Recovery] Forward-mode purity validated: {:.4f} >= {:.4f}".format(
+                        achieved_purity, fwd_target))
+                else:
+                    result['validated_forward_mode'] = False
+                    logger.info("  [RR Recovery] Forward-mode purity check: {} (target={:.4f})".format(
+                        "{:.4f}".format(achieved_purity) if achieved_purity is not None else "N/A", fwd_target))
+
+            # Soft feasible - forward mode only (even if purity validated)
             result['recovered_from_rr_sweep'] = True
             result['recovery_rr'] = rr
 

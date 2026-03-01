@@ -1,26 +1,37 @@
-# tac_calculator_seider.py
+# tac_calculator.py
 """
-TAC Calculator for Distillation Columns (v3.1 - Seider Vacuum Model)
-====================================================================
-Updated vacuum system sizing and costing using Seider et al. correlations.
+TAC Calculator for Distillation Columns (v4.0 - Unified Turton/CEPCI Model)
+============================================================================
+All equipment costs unified under CEPCI index using Turton et al. (2018)
+correlations, with Seider vacuum system kept at its native CEPCI base.
 
-Key Changes from v3.0:
+Key Changes from v3.1:
 ----------------------
-1. Air leakage: Seider Eq. 22.73 (volume-based correlation)
-2. Vacuum equipment: Table 22.32 cost correlations
-3. Auto-selection of vacuum system type
-4. Removed reflux drum (not needed for TAC optimization)
+1. Column vessel: Replaced Guthrie (1969, M&S-based) with Turton Table A.1
+   vertical process vessel correlation (volume-based, CEPCI = 397)
+2. Sieve trays: New separate costing using Turton Table A.1 (area-based),
+   with quantity factor Fq and tray-specific material factor
+3. CEPCI base: Corrected from 500 to 397 for all Turton correlations
+   (Turton's native base year is 2001, CEPCI = 397)
+4. Seider vacuum: Kept at CEPCI = 500 (Seider's native base, year 2006)
+5. Removed cepci_base_guthrie parameter (no longer needed)
+
+Cost Index Summary:
+-------------------
+- Turton (vessel, trays, HX): CEPCI base = 397 (2001) → ratio = 800/397 = 2.015
+- Seider (vacuum only):       CEPCI base = 500 (2006) → ratio = 800/500 = 1.600
 
 References:
 -----------
-1. Seider, Seader, Lewin, Widagdo - Product and Process Design Principles
+1. Turton, Shaeiwitz, Bhattacharyya, Whiting (2018) - Analysis, Synthesis,
+   and Design of Chemical Processes, 5th Ed., Appendix A (CAPCOST)
+2. Seider, Seader, Lewin, Widagdo (2017) - Product and Process Design
+   Principles, 4th Ed., Chapter 22
    - Eq. 22.73: Air leakage correlation
    - Table 22.32: Vacuum equipment cost correlations
-2. Turton et al. (2018) - Equipment cost correlations
-3. Towler & Sinnott (2021) - Chemical Engineering Design
 
 Author: PSE Lab, NTUST
-Date: December 2024
+Date: December 2024 (v3.1), February 2026 (v4.0)
 """
 
 import logging
@@ -222,35 +233,55 @@ class TACCalculator:
     # Minimum approach temperature (pinch)
     DELTA_T_MIN = 10.0  # °C
     
-    def __init__(self, 
+    def __init__(self,
                  tray_spacing=0.6096,         # m (2 ft standard)
                  payback_period=3,            # years
-                 ms_index=2221.5,             # Marshall & Swift Index (2025)
-                 cepci=800,                   # CEPCI for equipment costs (2024)
-                 cepci_base=500,              # Base CEPCI (Seider uses 500)
+                 cepci=800,                   # Current CEPCI (2024)
+                 cepci_base=397,              # Turton base CEPCI (2001)
+                 cepci_base_seider=500,       # Seider base CEPCI (2006) — vacuum only
                  operating_hours=8000,        # hours/year
                  material='SS',               # 'CS' or 'SS'
                  steam_cost_per_1000lb=5.0,   # $/1000 lb steam
                  electricity_cost_kWh=0.05):  # $/kWh
         """
-        Initialize TAC calculator with Seider correlations.
+        Initialize TAC calculator with Turton et al. (2018) correlations.
+
+        Cost Index Note:
+        ----------------
+        All equipment costs use CEPCI as the escalation index.
+
+        Turton correlations (CEPCI base = 397, year 2001):
+        - Column vessel: Table A.1, vertical process vessel (volume-based)
+        - Sieve trays: Table A.1, sieve tray (area-based)
+        - Condenser: Table A.1, floating head HX (area-based)
+        - Reboiler: Table A.1, kettle reboiler (area-based)
+
+        Seider correlations (CEPCI base = 500, year 2006):
+        - Vacuum system: Table 22.32 (kept separate, different source)
+
+        References:
+        -----------
+        - Turton, Shaeiwitz, Bhattacharyya, Whiting (2018), "Analysis,
+          Synthesis, and Design of Chemical Processes", 5th Ed., Appendix A
+        - Seider, Seader, Lewin, Widagdo (2017), "Product and Process
+          Design Principles", 4th Ed., Chapter 22
         """
         self.tray_spacing = tray_spacing
         self.tray_spacing_ft = tray_spacing / 0.3048
         self.payback_period = payback_period
-        
-        self.ms_index = ms_index
-        self.ms_base = 280
+
+        # Cost indices
         self.cepci = cepci
-        self.cepci_base = cepci_base
-        
+        self.cepci_base = cepci_base                    # Turton (2001): vessel, trays, HX
+        self.cepci_base_seider = cepci_base_seider      # Seider (2006): vacuum system only
+
         self.operating_hours = operating_hours
         self.material = material
-        
+
         # Operating cost parameters (from Seider example)
         self.steam_cost_per_1000lb = steam_cost_per_1000lb
         self.electricity_cost_kWh = electricity_cost_kWh
-        
+
         # Store selected utilities (for reporting)
         self.selected_cooling = None
         self.selected_heating = None
@@ -306,9 +337,11 @@ class TACCalculator:
         # ════════════════════════════════════════════════════════════════════
         # CAPITAL COSTS
         # ════════════════════════════════════════════════════════════════════
-        
-        # 1. Column + trays (Guthrie)
-        column_cost = self._column_cost_guthrie(diameter, n_trays, pressure)
+
+        # 1. Column vessel + trays (Turton et al. 2018)
+        vessel_cost = self._column_cost_turton(diameter, column_height, pressure)
+        tray_cost = self._tray_cost_turton(diameter, n_trays)
+        column_cost = vessel_cost + tray_cost
         
         # 2. Heat exchangers with AUTO UTILITY SELECTION
         cond_result = self._condenser_cost(Q_cond, T_cond)
@@ -369,7 +402,8 @@ class TACCalculator:
             
             # Capital cost breakdown
             'column_cost': column_cost,
-            'tray_cost': 0,  # Included in column_cost
+            'vessel_cost': vessel_cost,
+            'tray_cost': tray_cost,
             'condenser_cost': condenser_cost,
             'reboiler_cost': reboiler_cost,
             'vacuum_system_cost': vacuum_system_cost,
@@ -549,9 +583,9 @@ class TACCalculator:
         # Calculate base cost: Cp = a × S^b
         Cp_base = selected_equipment.cost_coef * (S ** selected_equipment.cost_exp)
         
-        # Apply CEPCI correction
-        capital_cost = Cp_base * (self.cepci / self.cepci_base)
-        
+        # Apply CEPCI correction (Seider base = 500, year 2006)
+        capital_cost = Cp_base * (self.cepci / self.cepci_base_seider)
+
         # Minimum practical cost
         capital_cost = max(capital_cost, 2000)
         
@@ -655,8 +689,8 @@ class TACCalculator:
             else:
                 S_for_cost = S
             
-            # Calculate capital cost
-            capital = equip.cost_coef * (S_for_cost ** equip.cost_exp) * (self.cepci / self.cepci_base)
+            # Calculate capital cost (Seider base = 500, year 2006)
+            capital = equip.cost_coef * (S_for_cost ** equip.cost_exp) * (self.cepci / self.cepci_base_seider)
             
             # Calculate operating cost
             if equip.steam_ratio > 0:
@@ -706,7 +740,7 @@ class TACCalculator:
         }
     
     # ════════════════════════════════════════════════════════════════════════
-    # ORIGINAL METHODS (unchanged)
+    # HEAT EXCHANGER COSTING (Turton Table A.1)
     # ════════════════════════════════════════════════════════════════════════
     
     def _select_cooling_utility(self, T_cond: float) -> CoolingUtility:
@@ -795,44 +829,120 @@ class TACCalculator:
         T = A + B * math.log(pressure)
         return max(T, 40.0)
     
-    def _column_cost_guthrie(self, diameter, n_trays, pressure):
-        """Guthrie correlation for column + trays."""
-        if n_trays <= 0:
-            return 0
-        
-        D_ft = diameter * 3.281
-        H_ft = n_trays * self.tray_spacing_ft
-        
-        D_ft = max(D_ft, 1.0)
-        H_ft = max(H_ft, 4.0)
-        
-        Fs = 1.0 if self.tray_spacing_ft >= 2.0 else 1.4
-        Ft = 0.0
-        Fm = 1.7 if self.material == 'SS' else 0.0
-        Fc = Fs + Ft + Fm
-        
-        # Guthrie pressure factor - smooth linear interpolation
-        # (Replaces step function to eliminate artificial cost discontinuities)
-        # Breakpoints: deep vacuum -> atmospheric
-        P_breaks = [0.0, 0.1, 0.3, 0.5, 1.0]
-        Fp_vals  = [1.40, 1.25, 1.15, 1.05, 1.00]
+    def _column_cost_turton(self, diameter, column_height, pressure):
+        """
+        Turton et al. (2018) correlation for vertical process vessel (shell only).
 
-        if pressure <= P_breaks[0]:
-            Fp = Fp_vals[0]
-        elif pressure >= P_breaks[-1]:
-            Fp = Fp_vals[-1]
+        Equation: log10(Cp°) = K1 + K2·log10(V) + K3·[log10(V)]²
+
+        Reference: Turton Table A.1, "Process vessel, vertical"
+        Base: CEPCI = 397 (year 2001)
+
+        Parameters
+        ----------
+        diameter : float
+            Column internal diameter (m)
+        column_height : float
+            Column height, tangent-to-tangent (m)
+        pressure : float
+            Operating pressure (bar abs)
+
+        Returns
+        -------
+        float : Purchased vessel cost ($) at current CEPCI
+        """
+        # Volume (m³) — cylindrical approximation
+        V = math.pi / 4 * diameter**2 * column_height
+
+        # Clamp to Turton valid range
+        V = max(V, 0.3)    # minimum 0.3 m³
+        V = min(V, 520.0)  # maximum 520 m³
+
+        # Turton Table A.1 — vertical process vessel
+        K1, K2, K3 = 3.4974, 0.4485, 0.1074
+        log_V = math.log10(V)
+        log_Cp = K1 + K2 * log_V + K3 * log_V**2
+        Cp0 = 10**log_Cp
+
+        # Pressure factor (Turton Table A.2)
+        # Vacuum (< 0.5 bar abs): Fp = 1.25
+        # Near atmospheric / above: Fp = 1.0
+        # High pressure (> ~2 barg): log-polynomial
+        if pressure < 0.5:
+            Fp = 1.25
+        elif pressure <= 2.0:
+            Fp = 1.0
         else:
-            Fp = Fp_vals[-1]  # fallback
-            for i in range(len(P_breaks) - 1):
-                if pressure <= P_breaks[i + 1]:
-                    t = (pressure - P_breaks[i]) / (P_breaks[i + 1] - P_breaks[i])
-                    Fp = Fp_vals[i] + t * (Fp_vals[i + 1] - Fp_vals[i])
-                    break
-        
-        cost = (self.ms_index / self.ms_base) * 101.9 * \
-               (D_ft ** 1.066) * (H_ft ** 0.82) * Fc * Fp
-        
-        return cost
+            # log10(Fp) = C1 + C2·log10(P) + C3·[log10(P)]²
+            # P in barg, C1=0.03881, C2=-0.11272, C3=0.08183
+            P_barg = pressure - 1.01325
+            if P_barg > 0:
+                log_P = math.log10(P_barg)
+                log_Fp = 0.03881 - 0.11272 * log_P + 0.08183 * log_P**2
+                Fp = max(10**log_Fp, 1.0)
+            else:
+                Fp = 1.0
+
+        # Material factor (Turton Table A.3)
+        Fm = 1.7 if self.material == 'SS' else 1.0
+
+        # Purchased cost with corrections, escalated to current CEPCI
+        vessel_cost = Cp0 * Fm * Fp * (self.cepci / self.cepci_base)
+
+        return vessel_cost
+
+    def _tray_cost_turton(self, diameter, n_trays):
+        """
+        Turton et al. (2018) correlation for sieve trays.
+
+        Equation: log10(Cp°) = K1 + K2·log10(A) + K3·[log10(A)]²
+
+        Reference: Turton Table A.1, "Sieve tray"
+        Base: CEPCI = 397 (year 2001)
+
+        Parameters
+        ----------
+        diameter : float
+            Column internal diameter (m)
+        n_trays : int
+            Number of trays (NT - 2, excluding condenser/reboiler)
+
+        Returns
+        -------
+        float : Total purchased tray cost ($) at current CEPCI
+        """
+        if n_trays <= 0:
+            return 0.0
+
+        # Tray area (m²)
+        A_tray = math.pi / 4 * diameter**2
+
+        # Clamp to Turton valid range
+        A_tray = max(A_tray, 0.07)   # minimum 0.07 m²
+        A_tray = min(A_tray, 12.3)   # maximum 12.3 m²
+
+        # Turton Table A.1 — sieve tray (per tray)
+        K1, K2, K3 = 2.9949, 0.4465, 0.3961
+        log_A = math.log10(A_tray)
+        log_Cp = K1 + K2 * log_A + K3 * log_A**2
+        Cp0_per_tray = 10**log_Cp
+
+        # Quantity factor Fq (Turton)
+        # Accounts for bulk discount (NT >= 20) or premium (NT < 20)
+        if n_trays >= 20:
+            Fq = 1.0
+        else:
+            log_NT = math.log10(max(n_trays, 1))
+            Fq = 10**(0.4771 + 0.08516 * log_NT - 0.3473 * log_NT**2)
+
+        # Material factor for trays (Turton Table A.6)
+        # NOTE: tray Fm differs from vessel Fm
+        Fm_tray = 1.189 if self.material == 'SS' else 1.0
+
+        # Total tray cost, escalated to current CEPCI
+        tray_cost = Cp0_per_tray * n_trays * Fm_tray * Fq * (self.cepci / self.cepci_base)
+
+        return tray_cost
     
     def _failed_result(self):
         """Return failed result dict."""
@@ -845,47 +955,53 @@ class TACCalculator:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(message)s')
-    
+
     print("=" * 70)
-    print("TAC CALCULATOR v3.1 - SEIDER VACUUM MODEL TEST")
+    print("TAC CALCULATOR v4.0 - UNIFIED TURTON/CEPCI MODEL TEST")
     print("=" * 70)
-    
+
+    print("\nCost Index Configuration:")
+    print(f"  Turton (vessel, trays, HX): CEPCI base = 397 (2001)")
+    print(f"  Seider (vacuum system):     CEPCI base = 500 (2006)")
+    print(f"  Current CEPCI:              800 (2024)")
+    print(f"  Turton ratio:               {800/397:.3f}x")
+    print(f"  Seider ratio:               {800/500:.3f}x")
+
     # ════════════════════════════════════════════════════════════════════════
-    # TEST 1: Verify Seider Example (Example 22.18)
+    # TEST 1: Verify Seider Air Leakage (Example 22.18)
     # ════════════════════════════════════════════════════════════════════════
     print("\n" + "-" * 60)
-    print("TEST 1: Verify Seider Example 22.18")
+    print("TEST 1: Verify Seider Example 22.18 (Air Leakage)")
     print("-" * 60)
     print("Given: V = 50,000 ft³, P = 25 kPa = 188 torr")
     print("Expected: W = 227 lb/hr")
-    
-    # Calculate manually
+
     V_ft3 = 50000
     P_torr = 188
     ln_P = math.log(P_torr)
     bracket = 0.0298 + 0.03088 * ln_P - 0.0005733 * ln_P**2
     W_calc = 5 + bracket * (V_ft3 ** 0.66)
-    
+
     print(f"\nCalculation:")
     print(f"  ln(188) = {ln_P:.4f}")
-    print(f"  bracket = 0.0298 + 0.03088×{ln_P:.3f} - 0.0005733×{ln_P:.3f}² = {bracket:.5f}")
+    print(f"  bracket = 0.0298 + 0.03088*{ln_P:.3f} - 0.0005733*{ln_P:.3f}^2 = {bracket:.5f}")
     print(f"  V^0.66 = {V_ft3}^0.66 = {V_ft3**0.66:.1f}")
-    print(f"  W = 5 + {bracket:.5f} × {V_ft3**0.66:.1f} = {W_calc:.1f} lb/hr")
-    print(f"\n  ✓ Expected: 227 lb/hr, Calculated: {W_calc:.1f} lb/hr")
-    
+    print(f"  W = 5 + {bracket:.5f} * {V_ft3**0.66:.1f} = {W_calc:.1f} lb/hr")
+    print(f"\n  Expected: 227 lb/hr, Calculated: {W_calc:.1f} lb/hr")
+
     # ════════════════════════════════════════════════════════════════════════
-    # TEST 2: EB/SM Column at 0.2 bar
+    # TEST 2: EB/SM Column at 0.2 bar (vacuum)
     # ════════════════════════════════════════════════════════════════════════
     print("\n" + "-" * 60)
     print("TEST 2: EB/SM Separation at 0.2 bar (150 torr)")
     print("-" * 60)
-    
+
     calc = TACCalculator(
         material='SS',
         cepci=800,
-        cepci_base=500
+        cepci_base=397,
     )
-    
+
     result = calc.calculate(
         nt=45,
         diameter=0.9,
@@ -895,39 +1011,40 @@ if __name__ == "__main__":
         T_cond=65.0,
         T_reb=85.0
     )
-    
+
     print(f"\nColumn: NT=45, D=0.9m, P=0.2 bar")
     print(f"\nVacuum System:")
     vac = result['vacuum_system']
     print(f"  Type: {vac['system_type']}")
-    print(f"  System volume: {vac['system_volume_m3']:.1f} m³ ({vac['system_volume_ft3']:.0f} ft³)")
+    print(f"  System volume: {vac['system_volume_m3']:.1f} m3 ({vac['system_volume_ft3']:.0f} ft3)")
     print(f"  Air leakage: {vac['air_leakage_lb_hr']:.1f} lb/hr ({vac['air_leakage_kg_hr']:.1f} kg/hr)")
-    print(f"  Volumetric flow: {vac['volumetric_flow_ft3_min']:.1f} ft³/min")
-    print(f"  Size factor: {vac['size_factor']:.2f}")
+    print(f"  Volumetric flow: {vac['volumetric_flow_ft3_min']:.1f} ft3/min")
     if vac['steam_consumption_lb_hr'] > 0:
         print(f"  Steam: {vac['steam_consumption_lb_hr']:.0f} lb/hr")
     else:
         print(f"  Power: {vac['power_kW']:.1f} kW")
     print(f"  Capital: ${vac['capital_cost']:,.0f}")
     print(f"  Operating: ${vac['annual_operating_cost']:,.0f}/yr")
-    
-    print(f"\nCost Summary:")
-    print(f"  Column:        ${result['column_cost']:>12,.0f}")
-    print(f"  Condenser:     ${result['condenser_cost']:>12,.0f}")
-    print(f"  Reboiler:      ${result['reboiler_cost']:>12,.0f}")
-    print(f"  Vacuum system: ${result['vacuum_system_cost']:>12,.0f}")
-    print(f"  ────────────────────────────────")
-    print(f"  TPC:           ${result['TPC']:>12,.0f}")
-    print(f"  TOC:           ${result['TOC']:>12,.0f}/yr")
-    print(f"  TAC:           ${result['TAC']:>12,.0f}/yr")
-    
+
+    print(f"\nCost Breakdown:")
+    print(f"  Vessel (Turton):  ${result['vessel_cost']:>12,.0f}")
+    print(f"  Trays (Turton):   ${result['tray_cost']:>12,.0f}")
+    print(f"  Column total:     ${result['column_cost']:>12,.0f}")
+    print(f"  Condenser:        ${result['condenser_cost']:>12,.0f}")
+    print(f"  Reboiler:         ${result['reboiler_cost']:>12,.0f}")
+    print(f"  Vacuum system:    ${result['vacuum_system_cost']:>12,.0f}")
+    print(f"  ----------------------------------------")
+    print(f"  TPC:              ${result['TPC']:>12,.0f}")
+    print(f"  TOC:              ${result['TOC']:>12,.0f}/yr")
+    print(f"  TAC:              ${result['TAC']:>12,.0f}/yr")
+
     # ════════════════════════════════════════════════════════════════════════
     # TEST 3: Deep Vacuum (0.05 bar = 37.5 torr)
     # ════════════════════════════════════════════════════════════════════════
     print("\n" + "-" * 60)
     print("TEST 3: Deep Vacuum at 0.05 bar (37.5 torr)")
     print("-" * 60)
-    
+
     result2 = calc.calculate(
         nt=35,
         diameter=0.8,
@@ -937,22 +1054,23 @@ if __name__ == "__main__":
         T_cond=45.0,
         T_reb=75.0
     )
-    
+
+    print(f"\nCost Breakdown:")
+    print(f"  Vessel:           ${result2['vessel_cost']:>12,.0f}")
+    print(f"  Trays:            ${result2['tray_cost']:>12,.0f}")
     vac2 = result2['vacuum_system']
-    print(f"\nVacuum System:")
-    print(f"  Type: {vac2['system_type']}")
-    print(f"  Air leakage: {vac2['air_leakage_lb_hr']:.1f} lb/hr")
-    print(f"  Capital: ${vac2['capital_cost']:,.0f}")
-    print(f"  Operating: ${vac2['annual_operating_cost']:,.0f}/yr")
-    print(f"\n  TAC: ${result2['TAC']:,.0f}/yr")
-    
+    print(f"  Vacuum ({vac2['system_type']}):")
+    print(f"    Capital:        ${vac2['capital_cost']:>12,.0f}")
+    print(f"    Operating:      ${vac2['annual_operating_cost']:>12,.0f}/yr")
+    print(f"  TAC:              ${result2['TAC']:>12,.0f}/yr")
+
     # ════════════════════════════════════════════════════════════════════════
     # TEST 4: Moderate Vacuum (0.5 bar = 375 torr)
     # ════════════════════════════════════════════════════════════════════════
     print("\n" + "-" * 60)
     print("TEST 4: Moderate Vacuum at 0.5 bar (375 torr)")
     print("-" * 60)
-    
+
     result3 = calc.calculate(
         nt=30,
         diameter=0.7,
@@ -962,22 +1080,23 @@ if __name__ == "__main__":
         T_cond=95.0,
         T_reb=120.0
     )
-    
+
+    print(f"\nCost Breakdown:")
+    print(f"  Vessel:           ${result3['vessel_cost']:>12,.0f}")
+    print(f"  Trays:            ${result3['tray_cost']:>12,.0f}")
     vac3 = result3['vacuum_system']
-    print(f"\nVacuum System:")
-    print(f"  Type: {vac3['system_type']}")
-    print(f"  Air leakage: {vac3['air_leakage_lb_hr']:.1f} lb/hr")
-    print(f"  Capital: ${vac3['capital_cost']:,.0f}")
-    print(f"  Operating: ${vac3['annual_operating_cost']:,.0f}/yr")
-    print(f"\n  TAC: ${result3['TAC']:,.0f}/yr")
-    
+    print(f"  Vacuum ({vac3['system_type']}):")
+    print(f"    Capital:        ${vac3['capital_cost']:>12,.0f}")
+    print(f"    Operating:      ${vac3['annual_operating_cost']:>12,.0f}/yr")
+    print(f"  TAC:              ${result3['TAC']:>12,.0f}/yr")
+
     # ════════════════════════════════════════════════════════════════════════
     # TEST 5: Atmospheric (no vacuum system needed)
     # ════════════════════════════════════════════════════════════════════════
     print("\n" + "-" * 60)
     print("TEST 5: Atmospheric Operation (1.01 bar)")
     print("-" * 60)
-    
+
     result4 = calc.calculate(
         nt=25,
         diameter=0.6,
@@ -987,25 +1106,41 @@ if __name__ == "__main__":
         T_cond=110.0,
         T_reb=135.0
     )
-    
-    print(f"\nVacuum System: {result4['vacuum_system']['system_type']}")
-    print(f"  Capital: ${result4['vacuum_system_cost']:,.0f}")
-    print(f"\n  TAC: ${result4['TAC']:,.0f}/yr")
-    
+
+    print(f"\nCost Breakdown:")
+    print(f"  Vessel:           ${result4['vessel_cost']:>12,.0f}")
+    print(f"  Trays:            ${result4['tray_cost']:>12,.0f}")
+    print(f"  Vacuum system:    None (atmospheric)")
+    print(f"  TAC:              ${result4['TAC']:>12,.0f}/yr")
+
     # ════════════════════════════════════════════════════════════════════════
     # COMPARISON SUMMARY
     # ════════════════════════════════════════════════════════════════════════
     print("\n" + "=" * 70)
     print("COMPARISON: Effect of Operating Pressure")
     print("=" * 70)
-    
-    print(f"\n{'Pressure':<12} {'Vacuum System':<25} {'Capital':>12} {'Operating':>12} {'TAC':>12}")
-    print("-" * 73)
-    print(f"{'0.05 bar':<12} {vac2['system_type']:<25} ${vac2['capital_cost']:>10,.0f} ${vac2['annual_operating_cost']:>10,.0f} ${result2['TAC']:>10,.0f}")
-    print(f"{'0.2 bar':<12} {vac['system_type']:<25} ${vac['capital_cost']:>10,.0f} ${vac['annual_operating_cost']:>10,.0f} ${result['TAC']:>10,.0f}")
-    print(f"{'0.5 bar':<12} {vac3['system_type']:<25} ${vac3['capital_cost']:>10,.0f} ${vac3['annual_operating_cost']:>10,.0f} ${result3['TAC']:>10,.0f}")
-    print(f"{'1.01 bar':<12} {'None':<25} ${0:>10,.0f} ${0:>10,.0f} ${result4['TAC']:>10,.0f}")
-    
+
+    print(f"\n{'Pressure':<10} {'Vessel':>10} {'Trays':>10} {'HX':>12} {'Vacuum':>10} {'TAC':>12}")
+    print("-" * 66)
+    for label, r in [('0.05 bar', result2), ('0.2 bar', result), ('0.5 bar', result3), ('1.01 bar', result4)]:
+        hx = r['condenser_cost'] + r['reboiler_cost']
+        print(f"{label:<10} ${r['vessel_cost']:>8,.0f} ${r['tray_cost']:>8,.0f} ${hx:>10,.0f} ${r['vacuum_system_cost']:>8,.0f} ${r['TAC']:>10,.0f}")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TRAY QUANTITY FACTOR TEST
+    # ════════════════════════════════════════════════════════════════════════
+    print("\n" + "-" * 60)
+    print("Tray Quantity Factor (Fq) - Turton")
+    print("-" * 60)
+    print(f"{'NT':>4}  {'Fq':>6}")
+    for nt in [1, 5, 10, 15, 20, 30, 50]:
+        if nt >= 20:
+            fq = 1.0
+        else:
+            log_nt = math.log10(max(nt, 1))
+            fq = 10**(0.4771 + 0.08516 * log_nt - 0.3473 * log_nt**2)
+        print(f"{nt:>4}  {fq:>6.3f}")
+
     print("\n" + "=" * 70)
     print("All tests completed!")
     print("=" * 70)

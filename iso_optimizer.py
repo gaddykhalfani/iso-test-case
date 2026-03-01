@@ -128,8 +128,8 @@ class EvaluationPoint:
     q_reb: float = 0
     q_cond: float = 0
     diameter: float = 0
-    T_reb: float = 0
-    T_cond: float = 0
+    T_reb: float = None
+    T_cond: float = None
     converged: bool = False
     feasibility: FeasibilityStatus = FeasibilityStatus.FEASIBLE
     infeasibility_reason: str = ""
@@ -220,19 +220,23 @@ class ISOOptimizer:
         self.evaluator = evaluator
         self.config = config
         self.purity_spec = purity_spec
-        
+
         # Extract bounds
         self.nt_bounds = config['bounds']['nt_bounds']
         self.feed_bounds = config['bounds']['feed_bounds']
         self.pressure_bounds = config['bounds']['pressure_bounds']
-        
+
         # Sweep settings
         self.pressure_points = config.get('pressure_points', 9)
         self.nt_step = config.get('nt_step', 1)
         self.feed_step = config.get('feed_step', 1)
         self.min_section_stages = config.get('min_section_stages', 3)
-        
-        # Temperature constraint (professor's requirement)
+
+        # Temperature constraint: applies to ANY column with styrene in its feed
+        # (Styrene polymerizes above ~120°C on hot stages — even if SM goes to
+        #  distillate, intermediate stages can have SM at elevated temperatures)
+        # Default True (conservative); auto-detected from feed stream after baseline
+        self.has_styrene = True  # Conservative default, overridden by auto-detect
         self.T_reb_max = config.get('T_reb_max', T_REBOILER_MAX)
         
         # Convergence settings
@@ -324,6 +328,17 @@ class ISOOptimizer:
             logger.info(f"  Configuration: NT={current_nt}, NF={current_feed}, P={current_pressure:.4f} bar")
             if baseline_result.feasibility == FeasibilityStatus.SOFT_FEASIBLE:
                 logger.warning("  NOTE: Baseline is SOFT FEASIBLE (RR-recovered)")
+
+            # Auto-detect styrene from FEED stream (not just reboiler)
+            # If styrene is anywhere in the column, T_reb constraint applies
+            try:
+                feed_stream = self.config['column']['feed_stream']
+                self.has_styrene = self.evaluator.aspen.auto_detect_styrene_in_feed(feed_stream)
+                logger.info("  [OK] Styrene auto-detect from feed '{}': has_styrene={}".format(
+                    feed_stream, self.has_styrene))
+            except Exception as e:
+                logger.warning("  Could not auto-detect styrene from feed: {}".format(e))
+                logger.warning("  Using conservative default: has_styrene=True")
         else:
             self.baseline_tac = None
             logger.warning("  Baseline did not converge or is infeasible")
@@ -547,7 +562,7 @@ class ISOOptimizer:
             logger.info(f"  NF changed: {feed_changed} ({prev_feed} -> {current_feed})")
             logger.info(f"  P changed: {pressure_changed} ({prev_pressure:.4f} -> {current_pressure:.4f})")
             
-            if tac_change < self.tac_tolerance and not nt_changed and not feed_changed:
+            if tac_change < self.tac_tolerance and not nt_changed and not feed_changed and not pressure_changed:
                 converged = True
                 logger.info("")
                 logger.info("★ CONVERGED! Design unchanged between iterations.")
@@ -636,7 +651,7 @@ class ISOOptimizer:
         for idx, p in enumerate(pressures):
             point = self._evaluate_with_feasibility(fixed_nt, fixed_feed, p, rr_hint=last_rr)
             result.points.append(point)
-            if point.feasibility == FeasibilityStatus.FEASIBLE and point.reflux_ratio is not None:
+            if point.feasibility in (FeasibilityStatus.FEASIBLE, FeasibilityStatus.SOFT_FEASIBLE) and point.reflux_ratio is not None:
                 last_rr = point.reflux_ratio
 
             # Emit progress (use overall best for display)
@@ -648,7 +663,7 @@ class ISOOptimizer:
                 total=total_points,
                 best_tac=current_best if current_best < float('inf') else None,
                 pressure=round(p, 4),
-                T_reb=round(point.T_reb, 1) if point.T_reb > 0 else None
+                T_reb=round(point.T_reb, 1) if point.T_reb is not None and point.T_reb > 0 else None
             )
 
             # Format status - prioritize hard feasible over soft feasible
@@ -672,7 +687,7 @@ class ISOOptimizer:
                 status = f"[X] {point.infeasibility_reason[:20]}"
 
             tac_str = f"${point.tac:,.0f}" if point.tac < 1e10 else "N/A"
-            T_str = f"{point.T_reb:.1f}C" if point.T_reb > 0 else "N/A"
+            T_str = f"{point.T_reb:.1f}C" if point.T_reb is not None and point.T_reb > 0 else "N/A"
 
             logger.info(f"{p:^10.4f} {T_str:^10} {tac_str:^15} {status:^25}")
 
@@ -680,19 +695,182 @@ class ISOOptimizer:
         if best_hard_tac < float('inf'):
             result.optimal_value = best_hard_pressure
             result.optimal_tac = best_hard_tac
-            logger.info(f"  -> Selected HARD FEASIBLE: P={best_hard_pressure:.4f}, TAC=${best_hard_tac:,.0f}")
+            logger.info(f"  -> Coarse sweep HARD FEASIBLE: P={best_hard_pressure:.4f}, TAC=${best_hard_tac:,.0f}")
         elif best_soft_tac < float('inf'):
             result.optimal_value = best_soft_pressure
             result.optimal_tac = best_soft_tac
-            logger.warning(f"  -> Selected SOFT FEASIBLE (no hard feasible available): P={best_soft_pressure:.4f}, TAC=${best_soft_tac:,.0f}")
-            logger.warning(f"     WARNING: This is an RR-recovered point - results may be less reliable")
+            logger.warning(f"  -> Coarse sweep SOFT FEASIBLE: P={best_soft_pressure:.4f}, TAC=${best_soft_tac:,.0f}")
         else:
             result.optimal_value = p_min
             result.optimal_tac = float('inf')
             logger.warning("  -> No feasible pressure found!")
+            return result
+
+        # ════════════════════════════════════════════════════════════════════
+        # PRESSURE REFINEMENT (Bisection near feasibility boundary)
+        # ════════════════════════════════════════════════════════════════════
+        # If TAC is declining at the best pressure (i.e., the next higher
+        # pressure is infeasible), refine the boundary to find the true
+        # optimum. This prevents the "stuck at boundary" issue (Comment #6).
+        result = self._refine_pressure(
+            result, fixed_nt, fixed_feed, pressures, iteration
+        )
 
         return result
     
+    def _refine_pressure(self, result: SweepResult, fixed_nt: int, fixed_feed: int,
+                          coarse_pressures: list, iteration: int) -> SweepResult:
+        """
+        Refine pressure near the feasibility boundary using bisection.
+
+        After the coarse sweep, if TAC is still declining at the best feasible
+        pressure (i.e., the next grid point is infeasible), we bisect the gap
+        to find the true optimum closer to the feasibility boundary.
+
+        This addresses Comment #6: "Is the pressure trapped at the boundary?"
+        """
+        # Identify feasibility of each coarse point
+        feasible_points = []  # (pressure, tac, point)
+        infeasible_after = []  # pressures that are infeasible right after a feasible
+
+        for p_point in result.points:
+            if p_point.feasibility in (FeasibilityStatus.FEASIBLE, FeasibilityStatus.SOFT_FEASIBLE):
+                feasible_points.append((p_point.pressure, p_point.tac, p_point))
+
+        if len(feasible_points) < 2:
+            return result  # Not enough points to refine
+
+        # Sort by pressure
+        feasible_points.sort(key=lambda x: x[0])
+
+        # Find the best feasible pressure
+        best_p = result.optimal_value
+        best_tac = result.optimal_tac
+
+        # Find the next coarse pressure above best_p
+        sorted_coarse = sorted(coarse_pressures)
+        best_idx = None
+        for i, p in enumerate(sorted_coarse):
+            if abs(p - best_p) < 1e-6:
+                best_idx = i
+                break
+
+        if best_idx is None or best_idx >= len(sorted_coarse) - 1:
+            return result  # Best is at or beyond the last coarse point
+
+        next_p = sorted_coarse[best_idx + 1]
+
+        # Check if the next point is infeasible
+        next_point = None
+        for p_point in result.points:
+            if abs(p_point.pressure - next_p) < 1e-6:
+                next_point = p_point
+                break
+
+        if next_point is None:
+            return result
+
+        next_is_infeasible = next_point.feasibility not in (
+            FeasibilityStatus.FEASIBLE, FeasibilityStatus.SOFT_FEASIBLE
+        )
+
+        # Also check if TAC was declining (best is the LAST feasible, not an interior minimum)
+        # An interior minimum doesn't need refinement — the U-curve found it naturally.
+        prev_p_point = None
+        if best_idx > 0:
+            prev_p = sorted_coarse[best_idx - 1]
+            for p_point in result.points:
+                if abs(p_point.pressure - prev_p) < 1e-6:
+                    prev_p_point = p_point
+                    break
+
+        tac_declining = True  # Default: assume declining
+        if prev_p_point and prev_p_point.feasibility in (
+            FeasibilityStatus.FEASIBLE, FeasibilityStatus.SOFT_FEASIBLE
+        ):
+            # If previous point has HIGHER TAC, the trend is declining → boundary optimum
+            tac_declining = prev_p_point.tac > best_tac
+
+        if not next_is_infeasible or not tac_declining:
+            # Best is interior (proper U-curve minimum) or next point is still feasible
+            # No refinement needed — the coarse sweep found a true minimum
+            logger.info(f"  -> Pressure refinement: NOT NEEDED (interior minimum at P={best_p:.4f})")
+            return result
+
+        # ════════════════════════════════════════════════════════════════════
+        # BISECTION: TAC still declining, next point infeasible
+        # Explore between best_p and next_p to find better feasible point
+        # ════════════════════════════════════════════════════════════════════
+        logger.info("")
+        logger.info(f"  -> Pressure refinement: TAC declining at P={best_p:.4f}, "
+                    f"next grid point P={next_p:.4f} is infeasible")
+        logger.info(f"     Bisecting [{best_p:.4f}, {next_p:.4f}] to find true boundary...")
+
+        refine_tol = 0.005  # 5 mbar tolerance
+        max_refine_steps = 6  # At most 6 bisection steps
+
+        low = best_p
+        high = next_p
+        best_refine_p = best_p
+        best_refine_tac = best_tac
+
+        last_rr = None
+        # Get RR from the best coarse point for warm-starting
+        for p_point in result.points:
+            if abs(p_point.pressure - best_p) < 1e-6 and p_point.reflux_ratio is not None:
+                last_rr = p_point.reflux_ratio
+                break
+
+        logger.info(f"{'Step':^6} {'Pressure':^10} {'T_reb':^10} {'TAC':^15} {'Status':^20}")
+        logger.info("-" * 65)
+
+        for step in range(max_refine_steps):
+            mid = (low + high) / 2.0
+
+            if high - low < refine_tol:
+                logger.info(f"  Refinement converged (gap < {refine_tol} bar)")
+                break
+
+            point = self._evaluate_with_feasibility(fixed_nt, fixed_feed, mid, rr_hint=last_rr)
+            result.points.append(point)
+
+            if point.feasibility in (FeasibilityStatus.FEASIBLE, FeasibilityStatus.SOFT_FEASIBLE):
+                if point.reflux_ratio is not None:
+                    last_rr = point.reflux_ratio
+
+                tac_str = f"${point.tac:,.0f}"
+                T_str = f"{point.T_reb:.1f}C" if point.T_reb is not None and point.T_reb > 0 else "N/A"
+
+                if point.tac < best_refine_tac:
+                    best_refine_tac = point.tac
+                    best_refine_p = mid
+                    status = "*** BETTER ***"
+                else:
+                    status = "OK (TAC rising)"
+
+                logger.info(f"{step+1:^6} {mid:^10.4f} {T_str:^10} {tac_str:^15} {status:^20}")
+
+                # Feasible: try higher pressure (push toward boundary)
+                low = mid
+            else:
+                # Infeasible: try lower pressure
+                T_str = f"{point.T_reb:.1f}C" if point.T_reb is not None and point.T_reb > 0 else "N/A"
+                reason = point.infeasibility_reason[:15] if point.infeasibility_reason else "infeasible"
+                logger.info(f"{step+1:^6} {mid:^10.4f} {T_str:^10} {'N/A':^15} {'[X] ' + reason:^20}")
+                high = mid
+
+        # Update result with refined optimum
+        if best_refine_tac < best_tac:
+            logger.info(f"  -> Refinement improved: P={best_refine_p:.4f} (TAC=${best_refine_tac:,.0f}) "
+                       f"vs coarse P={best_p:.4f} (TAC=${best_tac:,.0f})")
+            logger.info(f"     Savings: ${best_tac - best_refine_tac:,.0f}/year")
+            result.optimal_value = best_refine_p
+            result.optimal_tac = best_refine_tac
+        else:
+            logger.info(f"  -> Refinement: no improvement over coarse sweep (P={best_p:.4f})")
+
+        return result
+
     def _sweep_nt(self, fixed_pressure: float, fixed_feed: int, iteration: int = 1) -> SweepResult:
         """
         Sweep NT at fixed pressure and feed.
@@ -719,6 +897,8 @@ class ISOOptimizer:
         total_points = len(nt_values)
 
         last_rr = None  # RR warm-starting for sweep continuity
+        rising_count = 0  # Consecutive rising-TAC feasible points after minimum
+        EARLY_STOP_THRESHOLD = 5  # Stop after this many consecutive rises past minimum
         for idx, nt in enumerate(nt_values):
             # Adjust feed if needed
             adjusted_feed = self._adjust_feed_for_nt(fixed_feed, nt)
@@ -728,7 +908,7 @@ class ISOOptimizer:
 
             point = self._evaluate_with_feasibility(nt, adjusted_feed, fixed_pressure, rr_hint=last_rr)
             result.points.append(point)
-            if point.feasibility == FeasibilityStatus.FEASIBLE and point.reflux_ratio is not None:
+            if point.feasibility in (FeasibilityStatus.FEASIBLE, FeasibilityStatus.SOFT_FEASIBLE) and point.reflux_ratio is not None:
                 last_rr = point.reflux_ratio
 
             # Format status - prioritize hard feasible over soft feasible
@@ -737,8 +917,10 @@ class ISOOptimizer:
                     best_hard_tac = point.tac
                     best_hard_nt = nt
                     status = "*** BEST ***"
+                    rising_count = 0  # New minimum found, reset counter
                 else:
                     status = "OK"
+                    rising_count += 1
             elif point.feasibility == FeasibilityStatus.SOFT_FEASIBLE:
                 if point.tac < best_soft_tac:
                     best_soft_tac = point.tac
@@ -746,12 +928,16 @@ class ISOOptimizer:
                     # Only show as best if no hard feasible exists
                     if best_hard_tac >= float('inf'):
                         status = "~~ SOFT BEST ~~"
+                        rising_count = 0  # New minimum found, reset counter
                     else:
                         status = "~OK (RR-recovered)"
+                        rising_count += 1
                 else:
                     status = "~OK (RR-recovered)"
+                    rising_count += 1
             else:
                 status = f"[X] {point.infeasibility_reason[:15]}"
+                # Don't count infeasible points toward early termination
 
             tac_str = f"${point.tac:,.0f}" if point.tac < 1e10 else "N/A"
             logger.info(f"{nt:^8} {tac_str:^15} {status:^20}")
@@ -766,6 +952,11 @@ class ISOOptimizer:
                 best_tac=current_best if current_best < float('inf') else None,
                 nt=nt
             )
+
+            # Early termination: stop if past U-curve minimum
+            if rising_count >= EARLY_STOP_THRESHOLD and current_best < float('inf'):
+                logger.info(f"  -> Early termination: {EARLY_STOP_THRESHOLD} consecutive rises after minimum")
+                break
 
         # Select optimal: prefer hard feasible, fallback to soft feasible
         if best_hard_tac < float('inf'):
@@ -817,10 +1008,12 @@ class ISOOptimizer:
         total_points = len(feed_values)
 
         last_rr = None  # RR warm-starting for sweep continuity
+        rising_count = 0  # Consecutive rising-TAC feasible points after minimum
+        EARLY_STOP_THRESHOLD = 5  # Stop after this many consecutive rises past minimum
         for idx, feed in enumerate(feed_values):
             point = self._evaluate_with_feasibility(fixed_nt, feed, fixed_pressure, rr_hint=last_rr)
             result.points.append(point)
-            if point.feasibility == FeasibilityStatus.FEASIBLE and point.reflux_ratio is not None:
+            if point.feasibility in (FeasibilityStatus.FEASIBLE, FeasibilityStatus.SOFT_FEASIBLE) and point.reflux_ratio is not None:
                 last_rr = point.reflux_ratio
 
             # Format status - prioritize hard feasible over soft feasible
@@ -829,8 +1022,10 @@ class ISOOptimizer:
                     best_hard_tac = point.tac
                     best_hard_feed = feed
                     status = "*** BEST ***"
+                    rising_count = 0  # New minimum found, reset counter
                 else:
                     status = "OK"
+                    rising_count += 1
             elif point.feasibility == FeasibilityStatus.SOFT_FEASIBLE:
                 if point.tac < best_soft_tac:
                     best_soft_tac = point.tac
@@ -838,12 +1033,16 @@ class ISOOptimizer:
                     # Only show as best if no hard feasible exists
                     if best_hard_tac >= float('inf'):
                         status = "~~ SOFT BEST ~~"
+                        rising_count = 0  # New minimum found, reset counter
                     else:
                         status = "~OK (RR-recovered)"
+                        rising_count += 1
                 else:
                     status = "~OK (RR-recovered)"
+                    rising_count += 1
             else:
                 status = f"[X] {point.infeasibility_reason[:15]}"
+                # Don't count infeasible points toward early termination
 
             tac_str = f"${point.tac:,.0f}" if point.tac < 1e10 else "N/A"
             logger.info(f"{feed:^8} {tac_str:^15} {status:^20}")
@@ -858,6 +1057,11 @@ class ISOOptimizer:
                 best_tac=current_best if current_best < float('inf') else None,
                 feed=feed
             )
+
+            # Early termination: stop if past U-curve minimum
+            if rising_count >= EARLY_STOP_THRESHOLD and current_best < float('inf'):
+                logger.info(f"  -> Early termination: {EARLY_STOP_THRESHOLD} consecutive rises after minimum")
+                break
 
         # Select optimal: prefer hard feasible, fallback to soft feasible
         if best_hard_tac < float('inf'):
@@ -1105,8 +1309,8 @@ class ISOOptimizer:
                 q_reb=0,
                 q_cond=0,
                 diameter=0,
-                T_reb=0,
-                T_cond=0,
+                T_reb=None,
+                T_cond=None,
                 converged=False,
             )
             point.feasibility = FeasibilityStatus.INFEASIBLE_CONVERGENCE
@@ -1132,13 +1336,9 @@ class ISOOptimizer:
         T_reb = result.get('T_reb')
         T_cond = result.get('T_cond')
         
-        # Handle None temperatures - treat as infeasible (cannot verify constraint)
+        # Track whether temperatures are missing (for feasibility check)
         T_reb_missing = (T_reb is None)
         T_cond_missing = (T_cond is None)
-        if T_reb is None:
-            T_reb = 0.0
-        if T_cond is None:
-            T_cond = 0.0
 
         # Create evaluation point
         point = EvaluationPoint(
@@ -1168,17 +1368,18 @@ class ISOOptimizer:
             point.infeasibility_reason = "Simulation did not converge"
             self.infeasible_count += 1
 
-        elif T_reb_missing:
-            # CRITICAL: If T_reb cannot be extracted, treat as infeasible
-            # (cannot verify temperature constraint => conservative rejection)
+        elif self.has_styrene and T_reb_missing:
+            # CRITICAL: If T_reb cannot be extracted AND styrene is present,
+            # treat as infeasible (cannot verify temperature constraint)
             point.feasibility = FeasibilityStatus.INFEASIBLE_TEMPERATURE
             point.infeasibility_reason = "T_reb extraction failed (cannot verify constraint)"
             point.tac = float('inf')
             self.infeasible_count += 1
             logger.warning(f"  [X] INFEASIBLE: T_reb could not be extracted for NT={nt}, P={pressure:.4f}")
 
-        elif T_reb > self.T_reb_max:
-            # CRITICAL: Temperature constraint
+        elif self.has_styrene and T_reb is not None and T_reb > self.T_reb_max:
+            # Temperature constraint: ONLY for columns with styrene monomer
+            # Styrene polymerizes above ~120°C in the reboiler
             point.feasibility = FeasibilityStatus.INFEASIBLE_TEMPERATURE
             point.infeasibility_reason = f"T_reb={T_reb:.1f}C > {self.T_reb_max}C (polymerization risk)"
             point.tac = float('inf')  # Exclude from optimization
@@ -1199,11 +1400,13 @@ class ISOOptimizer:
                 point.feasibility = FeasibilityStatus.SOFT_FEASIBLE
                 self.soft_feasible_count += 1
                 recovery_rr = result.get('recovery_rr', 0)
-                logger.info(f"  [~] SOFT FEASIBLE (RR-recovered): TAC=${tac:,.0f}, T_reb={T_reb:.1f}C, RR={recovery_rr:.2f} (P={pressure:.4f})")
+                T_reb_str = f"{T_reb:.1f}" if T_reb is not None else "N/A"
+                logger.info(f"  [~] SOFT FEASIBLE (RR-recovered): TAC=${tac:,.0f}, T_reb={T_reb_str}C, RR={recovery_rr:.2f} (P={pressure:.4f})")
             else:
                 point.feasibility = FeasibilityStatus.FEASIBLE
                 self.feasible_count += 1
-                logger.info(f"  [OK] FEASIBLE: TAC=${tac:,.0f}, T_reb={T_reb:.1f}C (P={pressure:.4f})")
+                T_reb_str = f"{T_reb:.1f}" if T_reb is not None else "N/A"
+                logger.info(f"  [OK] FEASIBLE: TAC=${tac:,.0f}, T_reb={T_reb_str}C (P={pressure:.4f})")
         
         # Cache and store
         self.cache[key] = point
@@ -1267,7 +1470,15 @@ class ISOOptimizer:
         logger.info("Methodology: TRUE ISO (Professor's requirements)")
         logger.info("  * Variables optimized ONE AT A TIME: P -> NT -> NF")
         logger.info("  * Outer iteration loop with convergence check")
-        logger.info(f"  * Temperature constraint: T_reb <= {self.T_reb_max}C")
+        if self.has_styrene:
+            logger.info(f"  * Temperature constraint: T_reb <= {self.T_reb_max}C (styrene in reboiler)")
+        else:
+            logger.info(f"  * Temperature constraint: INACTIVE (no styrene monomer in reboiler)")
+        logger.info("")
+        logger.info("Penalty conditions:")
+        logger.info("  * T_reb violation (if styrene present): TAC = infinity")
+        logger.info("  * Non-convergence (RadFrac solver failure): TAC = infinity")
+        logger.info("  * Invalid results (Q_reb/Q_cond unreadable): TAC = infinity")
         logger.info("")
         logger.info("Physical basis:")
         logger.info("  * Pressure: Strategic (thermodynamic regime)")
@@ -1300,7 +1511,11 @@ class ISOOptimizer:
         logger.info("-" * 40)
         logger.info(f"  Total evaluations: {result.total_evaluations}")
         logger.info(f"  Feasible: {result.feasible_evaluations}")
-        logger.info(f"  Infeasible (T_reb > {self.T_reb_max}C): {result.infeasible_evaluations}")
+        if self.has_styrene:
+            logger.info(f"  Infeasible (T_reb > {self.T_reb_max}C): {result.infeasible_evaluations}")
+        else:
+            logger.info(f"  Infeasible (convergence): {result.infeasible_evaluations}")
+            logger.info(f"  T_reb constraint: INACTIVE (no styrene)")
         logger.info("")
         logger.info("=" * 70)
     
@@ -1400,8 +1615,10 @@ class ISOOptimizer:
             'metadata': {
                 'methodology': 'TRUE Iterative Sequential Optimization (ISO)',
                 'description': 'P -> NT -> NF, one at a time, with outer loop',
-                'temperature_constraint': f'T_reb <= {self.T_reb_max}C',
+                'has_styrene': self.has_styrene,
+                'temperature_constraint': f'T_reb <= {self.T_reb_max}C' if self.has_styrene else 'INACTIVE (no styrene)',
                 'convergence_tolerance': self.tac_tolerance,
+                'cost_index': 'CEPCI (unified)',
             },
             'baseline': baseline_section,
             'optimal': {
