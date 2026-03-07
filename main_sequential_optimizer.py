@@ -303,8 +303,8 @@ def run_nt_feed_sweep(evaluator, optimal_pressure: float,
 
 def run_iso_optimization(case_name: str, config_overrides: dict = None,
                          run_post_sweep: bool = True,
-                         sweep_nt_step: int = 2,
-                         sweep_feed_step: int = 2,
+                         sweep_nt_step: int = 1,
+                         sweep_feed_step: int = 1,
                          nt_range_around_opt: int = 20,
                          feed_range_around_opt: int = 10,
                          run_config: dict = None,
@@ -448,6 +448,7 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
     # ─────────────────────────────────────────────────────────────────────────
     
     iso_config = {
+        'column': config['column'],
         'bounds': config['bounds'],
         'initial': config.get('initial', {}),
         

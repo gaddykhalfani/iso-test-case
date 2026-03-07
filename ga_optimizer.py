@@ -106,6 +106,7 @@ class GAResult:
     total_time_seconds: float = 0.0
     total_evaluations: int = 0
     feasible_evaluations: int = 0
+    soft_feasible_evaluations: int = 0
     infeasible_evaluations: int = 0
 
     # Configuration
@@ -221,6 +222,15 @@ if PYMOO_AVAILABLE:
                 tac = result.get('TAC', 1e12)
                 T_reb = result.get('T_reb')
                 converged = result.get('converged', False)
+
+                # Reject soft feasible (RR-recovered forward-mode) points
+                # Forward-mode Q_reb is systematically lower than Design Spec mode,
+                # producing artificially low TAC. Match ISO behavior.
+                if result.get('recovered_from_rr_sweep', False):
+                    converged = False
+                    if self.optimizer_ref:
+                        self.optimizer_ref.soft_feasible_count += 1
+                    logger.debug(f"  Soft feasible rejected: NT={nt}, NF={feed}, P={pressure:.4f}")
 
                 # If T_reb is None, cannot verify constraint -> treat as infeasible
                 if T_reb is None:
@@ -373,6 +383,7 @@ class GAOptimizer:
         # Statistics
         self.eval_count = 0
         self.feasible_count = 0
+        self.soft_feasible_count = 0
         self.infeasible_count = 0
         self.convergence_history = []
 
@@ -520,6 +531,7 @@ class GAOptimizer:
             total_time_seconds=total_time,
             total_evaluations=self.eval_count,
             feasible_evaluations=self.feasible_count,
+            soft_feasible_evaluations=self.soft_feasible_count,
             infeasible_evaluations=self.infeasible_count,
             failed_rr_sweeps=self.failed_rr_sweeps,
             pop_size=self.ga_config.pop_size,
@@ -568,7 +580,8 @@ class GAOptimizer:
         logger.info("EVALUATION STATISTICS")
         logger.info("-" * 40)
         logger.info(f"  Total evaluations: {result.total_evaluations}")
-        logger.info(f"  Feasible: {result.feasible_evaluations}")
+        logger.info(f"  Feasible (hard): {result.feasible_evaluations}")
+        logger.info(f"  Soft feasible (rejected): {result.soft_feasible_evaluations}")
         logger.info(f"  Infeasible: {result.infeasible_evaluations}")
         logger.info("=" * 70)
 
@@ -649,6 +662,7 @@ class GAOptimizer:
             'statistics': {
                 'total_evaluations': result.total_evaluations,
                 'feasible': result.feasible_evaluations,
+                'soft_feasible_rejected': result.soft_feasible_evaluations,
                 'infeasible': result.infeasible_evaluations,
                 'time_seconds': result.total_time_seconds,
             },
@@ -693,6 +707,7 @@ class SimpleGAOptimizer:
 
         self.eval_count = 0
         self.feasible_count = 0
+        self.soft_feasible_count = 0
         self.infeasible_count = 0
         self.convergence_history = []
 
@@ -811,6 +826,12 @@ class SimpleGAOptimizer:
                 T_reb = result.get('T_reb')
                 converged = result.get('converged', False)
 
+                # Reject soft feasible (RR-recovered forward-mode) points
+                if result.get('recovered_from_rr_sweep', False):
+                    converged = False
+                    self.soft_feasible_count += 1
+                    logger.debug(f"  Soft feasible rejected: NT={nt}, NF={feed}, P={pressure:.4f}")
+
                 # If T_reb is None, cannot verify constraint -> treat as infeasible
                 if T_reb is None:
                     T_reb = self.T_reb_max + 50  # Force constraint violation
@@ -888,6 +909,7 @@ class SimpleGAOptimizer:
             total_time_seconds=total_time,
             total_evaluations=self.eval_count,
             feasible_evaluations=self.feasible_count,
+            soft_feasible_evaluations=self.soft_feasible_count,
             infeasible_evaluations=self.infeasible_count,
             pop_size=pop_size,
             n_generations=n_gen,
@@ -1173,6 +1195,7 @@ def main():
                 'statistics': {
                     'total_evaluations': result.total_evaluations,
                     'feasible': result.feasible_evaluations,
+                    'soft_feasible_rejected': result.soft_feasible_evaluations,
                     'infeasible': result.infeasible_evaluations,
                     'time_seconds': result.total_time_seconds,
                 },
