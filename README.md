@@ -22,6 +22,8 @@ Developed for thesis research at **PSE Lab, NTUST**.
 - **Auto-detection:** Automatic purity targets and styrene-in-feed detection from Aspen at startup
 - **Pressure Refinement:** Bisection-based pressure boundary search for ISO optimizer
 - **Early Termination:** Smart stopping in NT/NF sweeps after 5 consecutive rising-TAC points
+- **Global Best Tracking:** Remembers the best solution across all ISO iterations, preventing loss from oscillation
+- **Pressure Carry-Forward:** Injects previous iteration's optimal pressure into the next sweep grid to avoid missing narrow feasibility bands
 
 ---
 

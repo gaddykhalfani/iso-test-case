@@ -261,6 +261,12 @@ class ISOOptimizer:
         # Baseline TAC recording (for improvement metrics)
         self.baseline_result = None
         self.baseline_tac = None
+
+        # Global best tracking across all iterations
+        # (Prevents losing a good solution when ISO oscillates)
+        self.global_best_tac = float('inf')
+        self.global_best_config = None  # (nt, feed, pressure)
+        self.global_best_iteration = 0
     
     def run(self, case_name: str = "Case") -> ISOResult:
         """
@@ -322,23 +328,22 @@ class ISOOptimizer:
         )
         self.baseline_result = baseline_result
 
+        # Auto-detect styrene from FEED stream — always run, independent of baseline convergence
+        try:
+            feed_stream = self.config['column']['feed_stream']
+            self.has_styrene = self.evaluator.aspen.auto_detect_styrene_in_feed(feed_stream)
+            logger.info("  [OK] Styrene auto-detect from feed '{}': has_styrene={}".format(
+                feed_stream, self.has_styrene))
+        except Exception as e:
+            logger.warning("  Could not auto-detect styrene from feed: {}".format(e))
+            logger.warning("  Using conservative default: has_styrene=True")
+
         if baseline_result.converged and baseline_result.feasibility in (FeasibilityStatus.FEASIBLE, FeasibilityStatus.SOFT_FEASIBLE):
             self.baseline_tac = baseline_result.tac
             logger.info(f"  BASELINE TAC: ${self.baseline_tac:,.0f}/year")
             logger.info(f"  Configuration: NT={current_nt}, NF={current_feed}, P={current_pressure:.4f} bar")
             if baseline_result.feasibility == FeasibilityStatus.SOFT_FEASIBLE:
                 logger.warning("  NOTE: Baseline is SOFT FEASIBLE (RR-recovered)")
-
-            # Auto-detect styrene from FEED stream (not just reboiler)
-            # If styrene is anywhere in the column, T_reb constraint applies
-            try:
-                feed_stream = self.config['column']['feed_stream']
-                self.has_styrene = self.evaluator.aspen.auto_detect_styrene_in_feed(feed_stream)
-                logger.info("  [OK] Styrene auto-detect from feed '{}': has_styrene={}".format(
-                    feed_stream, self.has_styrene))
-            except Exception as e:
-                logger.warning("  Could not auto-detect styrene from feed: {}".format(e))
-                logger.warning("  Using conservative default: has_styrene=True")
         else:
             self.baseline_tac = None
             logger.warning("  Baseline did not converge or is infeasible")
@@ -348,6 +353,7 @@ class ISOOptimizer:
         logger.info("=" * 50)
 
         converged = False
+        prev_optimal_pressure = None  # Track previous iteration's best P for carry-forward
 
         # ════════════════════════════════════════════════════════════════════
         # OUTER ITERATION LOOP
@@ -391,8 +397,8 @@ class ISOOptimizer:
                 message=f"Sweeping pressure (NT={current_nt}, NF={current_feed} fixed)"
             )
 
-            pressure_sweep = self._sweep_pressure(current_nt, current_feed, iteration)
-            
+            pressure_sweep = self._sweep_pressure(current_nt, current_feed, iteration, prev_optimal_pressure=prev_optimal_pressure)
+
             if pressure_sweep.optimal_tac < float('inf'):
                 current_pressure = pressure_sweep.optimal_value
                 logger.info(f"  -> P* = {current_pressure:.4f} bar, TAC=${pressure_sweep.optimal_tac:,.0f}")
@@ -542,7 +548,17 @@ class ISOOptimizer:
                 optimal_tac=current_tac,
             )
             self.iterations.append(iter_result)
-            
+
+            # Update carry-forward pressure for next iteration
+            prev_optimal_pressure = current_pressure
+
+            # Update global best tracking
+            if current_tac < self.global_best_tac:
+                self.global_best_tac = current_tac
+                self.global_best_config = (current_nt, current_feed, current_pressure)
+                self.global_best_iteration = iteration
+                logger.info(f"  [Global Best] Updated: TAC=${current_tac:,.0f} at P={current_pressure:.4f}, NT={current_nt}, NF={current_feed} (iter {iteration})")
+
             # ────────────────────────────────────────────────────────────────
             # CONVERGENCE CHECK
             # ────────────────────────────────────────────────────────────────
@@ -572,11 +588,32 @@ class ISOOptimizer:
                 logger.info("-> Not converged, continuing to next iteration...")
         
         # ════════════════════════════════════════════════════════════════════
-        # BUILD FINAL RESULT
+        # BUILD FINAL RESULT (with global best check)
         # ════════════════════════════════════════════════════════════════════
-        
+
         total_time = time.time() - self.start_time
-        
+
+        # Check if an earlier iteration found a better solution than the
+        # converged point. This can happen when the ISO outer loop oscillates
+        # (e.g., narrow feasibility bands missed by the coarse pressure grid).
+        used_global_best = False
+        if self.global_best_tac < current_tac and self.global_best_config is not None:
+            gb_nt, gb_feed, gb_pressure = self.global_best_config
+            logger.info("")
+            logger.info("=" * 60)
+            logger.info("GLOBAL BEST RECOVERY")
+            logger.info("=" * 60)
+            logger.info(f"  Converged solution: P={current_pressure:.4f}, NT={current_nt}, NF={current_feed}, TAC=${current_tac:,.0f}")
+            logger.info(f"  Global best (iter {self.global_best_iteration}): P={gb_pressure:.4f}, NT={gb_nt}, NF={gb_feed}, TAC=${self.global_best_tac:,.0f}")
+            logger.info(f"  Savings: ${current_tac - self.global_best_tac:,.0f}/year")
+            logger.info(f"  -> Using global best as final optimum")
+            logger.info("=" * 60)
+            current_nt = gb_nt
+            current_feed = gb_feed
+            current_pressure = gb_pressure
+            current_tac = self.global_best_tac
+            used_global_best = True
+
         result = ISOResult(
             optimal_nt=current_nt,
             optimal_feed=current_feed,
@@ -593,10 +630,11 @@ class ISOOptimizer:
             case_name=case_name,
             timestamp=timestamp,
         )
-        
+
         # Store for visualization
         self.result = result
-        
+        self.used_global_best = used_global_best
+
         self._print_summary(result)
 
         # Emit final progress
@@ -619,7 +657,8 @@ class ISOOptimizer:
     # SWEEP METHODS (ONE VARIABLE AT A TIME)
     # ════════════════════════════════════════════════════════════════════════
     
-    def _sweep_pressure(self, fixed_nt: int, fixed_feed: int, iteration: int = 1) -> SweepResult:
+    def _sweep_pressure(self, fixed_nt: int, fixed_feed: int, iteration: int = 1,
+                        prev_optimal_pressure: float = None) -> SweepResult:
         """
         Sweep pressure at fixed NT and NF.
 
@@ -635,6 +674,16 @@ class ISOOptimizer:
             p_min + i * (p_max - p_min) / (self.pressure_points - 1)
             for i in range(self.pressure_points)
         ]
+
+        # Carry-forward: include previous iteration's optimal pressure
+        # Prevents losing a known-good pressure when the coarse grid misses
+        # narrow feasibility bands (e.g., COL4 P~0.044 between grid points)
+        if prev_optimal_pressure is not None:
+            already_in_grid = any(abs(p - prev_optimal_pressure) < 0.001 for p in pressures)
+            if not already_in_grid and p_min <= prev_optimal_pressure <= p_max:
+                pressures.append(prev_optimal_pressure)
+                pressures.sort()
+                logger.info(f"  [Carry-forward] Added previous optimal P={prev_optimal_pressure:.4f} to sweep grid")
 
         logger.info("")
         logger.info(f"{'Pressure':^10} {'T_reb':^10} {'TAC':^15} {'Status':^25}")
@@ -1500,6 +1549,8 @@ class ISOOptimizer:
         logger.info("")
         logger.info("-" * 40)
         logger.info("OPTIMAL CONFIGURATION")
+        if getattr(self, 'used_global_best', False):
+            logger.info(f"  (from global best at iteration {self.global_best_iteration})")
         logger.info("-" * 40)
         logger.info(f"  Number of Stages (NT): {result.optimal_nt}")
         logger.info(f"  Feed Stage (NF): {result.optimal_feed}")
@@ -1626,6 +1677,8 @@ class ISOOptimizer:
                 'feed': self.result.optimal_feed,
                 'pressure': self.result.optimal_pressure,
                 'tac': self.result.optimal_tac,
+                'from_global_best': getattr(self, 'used_global_best', False),
+                'global_best_iteration': self.global_best_iteration if getattr(self, 'used_global_best', False) else None,
             },
             'improvement': improvement_section,
             'convergence': {
