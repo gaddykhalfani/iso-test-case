@@ -553,12 +553,16 @@ def run_iso_optimization(case_name: str, config_overrides: dict = None,
             }
         
         # Generate all plots including multiple U-curves
-        plot_files = visualizer.plot_all(
-            optimizer,
-            case_name,
-            nt_feed_results=nt_feed_sweep_results,  # Pass sweep data for U-curves
-            n_ucurves=7  # Number of U-curves to display
-        )
+        try:
+            plot_files = visualizer.plot_all(
+                optimizer,
+                case_name,
+                nt_feed_results=nt_feed_sweep_results,  # Pass sweep data for U-curves
+                n_ucurves=7  # Number of U-curves to display
+            )
+        except Exception as e:
+            logger.error(f"Plot generation failed: {e}")
+            plot_files = []
 
         # Generate RR vs Purity plot for INFEASIBLE designs
         if result and result.failed_rr_sweeps:

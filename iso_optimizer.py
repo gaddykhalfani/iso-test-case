@@ -328,15 +328,24 @@ class ISOOptimizer:
         )
         self.baseline_result = baseline_result
 
-        # Auto-detect styrene from FEED stream — always run, independent of baseline convergence
+        # Auto-detect styrene in REBOILER — checks actual liquid composition at last stage
+        # This is more accurate than feed check: trace styrene in feed may not reach reboiler
         try:
-            feed_stream = self.config['column']['feed_stream']
-            self.has_styrene = self.evaluator.aspen.auto_detect_styrene_in_feed(feed_stream)
-            logger.info("  [OK] Styrene auto-detect from feed '{}': has_styrene={}".format(
-                feed_stream, self.has_styrene))
+            block_name = self.config['column']['block_name']
+            self.has_styrene = self.evaluator.aspen.auto_detect_styrene_in_reboiler(block_name)
+            logger.info("  [OK] Styrene auto-detect from reboiler '{}': has_styrene={}".format(
+                block_name, self.has_styrene))
         except Exception as e:
-            logger.warning("  Could not auto-detect styrene from feed: {}".format(e))
-            logger.warning("  Using conservative default: has_styrene=True")
+            # Fallback to feed check if reboiler output not available
+            logger.warning("  Could not read reboiler composition: {}".format(e))
+            try:
+                feed_stream = self.config['column']['feed_stream']
+                self.has_styrene = self.evaluator.aspen.auto_detect_styrene_in_feed(feed_stream)
+                logger.info("  [Fallback] Styrene auto-detect from feed '{}': has_styrene={}".format(
+                    feed_stream, self.has_styrene))
+            except Exception as e2:
+                logger.warning("  Could not auto-detect styrene: {}".format(e2))
+                logger.warning("  Using conservative default: has_styrene=True")
 
         if baseline_result.converged and baseline_result.feasibility in (FeasibilityStatus.FEASIBLE, FeasibilityStatus.SOFT_FEASIBLE):
             self.baseline_tac = baseline_result.tac

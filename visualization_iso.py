@@ -569,7 +569,7 @@ class ISOVisualizer:
             end = min(len(all_feeds), start + n_curves)
             start = max(0, end - n_curves)
             selected_feeds = all_feeds[start:end]
-            if optimal_feed and optimal_feed not in selected_feeds:
+            if optimal_feed and optimal_feed in feed_groups and optimal_feed not in selected_feeds:
                 selected_feeds.append(optimal_feed)
                 selected_feeds.sort()
         else:  # 'spread'
@@ -578,7 +578,7 @@ class ISOVisualizer:
             else:
                 indices = np.linspace(0, len(all_feeds) - 1, n_curves, dtype=int)
                 selected_feeds = [all_feeds[i] for i in indices]
-                if optimal_feed and optimal_feed not in selected_feeds:
+                if optimal_feed and optimal_feed in feed_groups and optimal_feed not in selected_feeds:
                     selected_feeds.append(optimal_feed)
                     selected_feeds.sort()
         
